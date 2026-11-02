@@ -207,7 +207,10 @@ pub fn render_final_video(
             args.push(a.to_string_lossy().into());
             // Downmix odd layouts (e.g. 3.0 from some USB mics) to stereo AAC.
             args.push("-filter:a".into());
-            args.push("aresample=48000:ocl=stereo".into());
+            args.push(
+                "aresample=48000:ocl=stereo,aformat=sample_fmts=fltp:channel_layouts=stereo"
+                    .into(),
+            );
         }
         args.push("-t".into());
         args.push(format!("{duration_secs:.3}"));
@@ -215,10 +218,14 @@ pub fn render_final_video(
         args.push("libx264".into());
         args.push("-pix_fmt".into());
         args.push("yuv420p".into());
-        args.push("-c:a".into());
-        args.push("aac".into());
-        args.push("-b:a".into());
-        args.push("192k".into());
+        if t.audio.is_some() {
+            args.push("-c:a".into());
+            args.push("aac".into());
+            args.push("-b:a".into());
+            args.push("192k".into());
+            args.push("-ac".into());
+            args.push("2".into());
+        }
         args.push("-shortest".into());
         args.push(out.to_string_lossy().into());
         run_ffmpeg(&ffmpeg, &args)?;
@@ -274,13 +281,14 @@ pub fn render_final_video(
     }
 
     let (w, h) = (1920u32, 1080u32);
+    let corner_r = 28u32;
     let mut args: Vec<String> = vec!["-y".into()];
-    // Base canvas
+    // Soft studio backdrop (matches in-app stage feel).
     args.push("-f".into());
     args.push("lavfi".into());
     args.push("-i".into());
     args.push(format!(
-        "color=c=0x0b1220:s={w}x{h}:d={duration_secs:.3}:r=30,format=yuv420p"
+        "color=c=0x10141e:s={w}x{h}:d={duration_secs:.3}:r=30,format=rgba"
     ));
 
     let mut video_input_idx = Vec::new();
@@ -344,7 +352,9 @@ pub fn render_final_video(
 
     let cells = layout_cells(layout, n, w, h);
     let mut fc: Vec<String> = Vec::new();
-    let mut last_label = "0:v".to_string();
+    // Keep alpha on the running composition so rounded tiles composite cleanly.
+    let mut last_label = "base0".to_string();
+    fc.push("[0:v]format=rgba[base0]".into());
     let mut vscale_i = 0usize;
 
     for (i, t) in tracks.iter().enumerate() {
@@ -353,16 +363,53 @@ pub fn render_final_video(
         };
         let cell = &cells[i.min(cells.len() - 1)];
         let enable = enable_expr_for(&intervals, &t.participant_id, duration_ms);
-        let scaled = format!("v{i}");
+        let radius = corner_r.min(cell.w / 4).min(cell.h / 4).max(12);
+        let fitted = format!("vf{i}");
+        let rounded = format!("vr{i}");
+        let shadow = format!("vs{i}");
+        let named = format!("vn{i}");
+        // Cover-fit into 16:9 tile, then soft rounded alpha (studio chrome).
         fc.push(format!(
-            "[{vin}:v]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:color=0x0b1220,setsar=1,fps=30,format=yuv420p[{scaled}]",
-            cell.w, cell.h, cell.w, cell.h, scaled = scaled
+            "[{vin}:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,fps=30,format=rgba[{fitted}]",
+            vin = vin,
+            w = cell.w,
+            h = cell.h,
+            fitted = fitted
         ));
+        fc.push(round_tile_alpha(&fitted, &rounded, radius));
+        // Drop shadow under the tile
+        fc.push(format!(
+            "color=c=black@0.45:s={cw}x{ch}:d={dur:.3},format=rgba,{alpha},fps=30[{shadow}]",
+            cw = cell.w,
+            ch = cell.h,
+            dur = duration_secs,
+            alpha = round_alpha_geq(radius),
+            shadow = shadow
+        ));
+        let label = escape_drawtext(&t.name);
+        fc.push(format!(
+            "[{rounded}]drawtext=text='{label}':fontsize={fs}:fontcolor=white:borderw=0:shadowcolor=black@0.65:shadowx=1:shadowy=1:x=22:y=h-42[{named}]",
+            rounded = rounded,
+            label = label,
+            named = named,
+            fs = if cell.w > 700 { 30 } else { 22 }
+        ));
+
+        let after_shadow = format!("ovs{vscale_i}");
         let out_label = format!("ov{vscale_i}");
         fc.push(format!(
-            "[{base}][{scaled}]overlay={x}:{y}:eof_action=pass:enable='{enable}'[{out}]",
+            "[{base}][{shadow}]overlay={x}:{y}:eof_action=pass:format=auto:enable='{enable}'[{mid}]",
             base = last_label,
-            scaled = scaled,
+            shadow = shadow,
+            x = cell.x + 5,
+            y = cell.y + 8,
+            enable = enable,
+            mid = after_shadow
+        ));
+        fc.push(format!(
+            "[{mid}][{named}]overlay={x}:{y}:eof_action=pass:format=auto:enable='{enable}'[{out}]",
+            mid = after_shadow,
+            named = named,
             x = cell.x,
             y = cell.y,
             enable = enable,
@@ -372,16 +419,15 @@ pub fn render_final_video(
         vscale_i += 1;
     }
 
-    // Audio mix with presence gates — downmix any channel count to stereo.
+    // Audio mix — eval=frame is required or time-based volume stays silent.
     let mut amix_inputs = Vec::new();
     let mut a_i = 0usize;
     for (i, t) in tracks.iter().enumerate() {
         let enable = enable_expr_for(&intervals, &t.participant_id, duration_ms);
         if let Some(ain) = audio_input_idx[i] {
             let lab = format!("a{a_i}");
-            // aresample ocl=stereo downmixes 1.0 / 3.0 / 5.1 etc. before volume gate
             fc.push(format!(
-                "[{ain}:a]aresample=48000:ocl=stereo,aformat=sample_fmts=fltp,volume='{enable}'[{lab}]",
+                "[{ain}:a]aresample=48000:ocl=stereo,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=eval=frame:volume='{enable}'[{lab}]",
                 ain = ain,
                 enable = enable,
                 lab = lab
@@ -396,13 +442,23 @@ pub fn render_final_video(
             .iter()
             .map(|l| format!("[{l}]"))
             .collect::<String>();
-        fc.push(format!(
-            "{inputs}amix=inputs={n}:duration=longest:dropout_transition=0,alimiter=limit=0.95[aout]",
-            inputs = inputs,
-            n = amix_inputs.len()
-        ));
+        if amix_inputs.len() == 1 {
+            fc.push(format!(
+                "{inputs}anull,alimiter=limit=0.95[aout]",
+                inputs = inputs
+            ));
+        } else {
+            fc.push(format!(
+                "{inputs}amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]",
+                inputs = inputs,
+                n = amix_inputs.len()
+            ));
+        }
     }
-    fc.push(format!("[{last}]null[vout]", last = last_label));
+    fc.push(format!(
+        "[{last}]format=yuv420p[vout]",
+        last = last_label
+    ));
     let filter = fc.join(";");
     let has_audio = !amix_inputs.is_empty();
 
@@ -417,6 +473,8 @@ pub fn render_final_video(
         args.push("aac".into());
         args.push("-b:a".into());
         args.push("192k".into());
+        args.push("-ac".into());
+        args.push("2".into());
     }
     args.push("-t".into());
     args.push(format!("{duration_secs:.3}"));
@@ -450,9 +508,22 @@ struct Cell {
     h: u32,
 }
 
+/// Keep tiles 16:9 (studio stage), never stretch into tall squares.
+fn fit_16x9(max_w: u32, max_h: u32) -> (u32, u32) {
+    let max_w = max_w.max(160);
+    let max_h = max_h.max(90);
+    let by_w_h = (max_w as f32 * 9.0 / 16.0) as u32;
+    if by_w_h <= max_h {
+        (max_w, by_w_h.max(90))
+    } else {
+        let by_h_w = (max_h as f32 * 16.0 / 9.0) as u32;
+        (by_h_w.max(160), max_h)
+    }
+}
+
 fn layout_cells(layout: &str, n: usize, w: u32, h: u32) -> Vec<Cell> {
     let n = n.max(1);
-    let gap = 12u32;
+    let gap = 28u32;
     match layout {
         "equal" => {
             let (cols, rows) = match n {
@@ -461,46 +532,51 @@ fn layout_cells(layout: &str, n: usize, w: u32, h: u32) -> Vec<Cell> {
                 3 | 4 => (2, 2),
                 _ => (3, 2),
             };
-            let cw = (w - gap * (cols as u32 + 1)) / cols as u32;
-            let ch = (h - gap * (rows as u32 + 1)) / rows as u32;
+            let slot_w = (w - gap * (cols as u32 + 1)) / cols as u32;
+            let slot_h = (h - gap * (rows as u32 + 1)) / rows as u32;
+            let (tw, th) = fit_16x9(slot_w, slot_h);
             (0..n)
                 .map(|i| {
                     let col = (i % cols) as u32;
                     let row = (i / cols) as u32;
+                    let slot_x = gap + col * (slot_w + gap);
+                    let slot_y = gap + row * (slot_h + gap);
                     Cell {
-                        x: gap + col * (cw + gap),
-                        y: gap + row * (ch + gap),
-                        w: cw,
-                        h: ch,
+                        x: slot_x + slot_w.saturating_sub(tw) / 2,
+                        y: slot_y + slot_h.saturating_sub(th) / 2,
+                        w: tw,
+                        h: th,
                     }
                 })
                 .collect()
         }
         "dynamic" => {
-            // Speaker large left/top; others stacked on the side (active speaker
-            // order is left to callers — first track is treated as primary).
             if n == 1 {
+                let (tw, th) = fit_16x9(w - gap * 2, h - gap * 2);
                 return vec![Cell {
-                    x: gap,
-                    y: gap,
-                    w: w - gap * 2,
-                    h: h - gap * 2,
+                    x: (w - tw) / 2,
+                    y: (h - th) / 2,
+                    w: tw,
+                    h: th,
                 }];
             }
-            let side_w = (w as f32 * 0.28) as u32;
-            let main_w = w - side_w - gap * 3;
+            let side_slot_w = (w as f32 * 0.26) as u32;
+            let main_slot_w = w - side_slot_w - gap * 3;
+            let (main_w, main_h) = fit_16x9(main_slot_w, h - gap * 2);
             let mut cells = vec![Cell {
-                x: gap,
-                y: gap,
+                x: gap + main_slot_w.saturating_sub(main_w) / 2,
+                y: (h - main_h) / 2,
                 w: main_w,
-                h: h - gap * 2,
+                h: main_h,
             }];
             let side_n = (n - 1).max(1) as u32;
-            let side_h = (h - gap * (side_n + 1)) / side_n;
+            let side_slot_h = (h - gap * (side_n + 1)) / side_n;
+            let (side_w, side_h) = fit_16x9(side_slot_w, side_slot_h);
             for i in 0..(n - 1) {
+                let slot_y = gap + i as u32 * (side_slot_h + gap);
                 cells.push(Cell {
-                    x: gap * 2 + main_w,
-                    y: gap + i as u32 * (side_h + gap),
+                    x: gap * 2 + main_slot_w + side_slot_w.saturating_sub(side_w) / 2,
+                    y: slot_y + side_slot_h.saturating_sub(side_h) / 2,
                     w: side_w,
                     h: side_h,
                 });
@@ -508,36 +584,71 @@ fn layout_cells(layout: &str, n: usize, w: u32, h: u32) -> Vec<Cell> {
             cells
         }
         _ => {
-            // normal: host (first) large, others strip along bottom
+            // normal: host large, guests in a 16:9 strip along the bottom
             if n == 1 {
+                let (tw, th) = fit_16x9(w - gap * 2, h - gap * 2);
                 return vec![Cell {
-                    x: gap,
-                    y: gap,
-                    w: w - gap * 2,
-                    h: h - gap * 2,
+                    x: (w - tw) / 2,
+                    y: (h - th) / 2,
+                    w: tw,
+                    h: th,
                 }];
             }
-            let strip_h = (h as f32 * 0.28) as u32;
-            let main_h = h - strip_h - gap * 3;
+            let strip_budget = (h as f32 * 0.30) as u32;
+            let main_budget = h - strip_budget - gap * 3;
+            let (main_w, main_h) = fit_16x9(w - gap * 2, main_budget);
             let mut cells = vec![Cell {
-                x: gap,
-                y: gap,
-                w: w - gap * 2,
+                x: (w - main_w) / 2,
+                y: gap + main_budget.saturating_sub(main_h) / 2,
+                w: main_w,
                 h: main_h,
             }];
             let side_n = (n - 1).max(1) as u32;
-            let strip_w = (w - gap * (side_n + 1)) / side_n;
+            let strip_slot_w = (w - gap * (side_n + 1)) / side_n;
+            let (sw, sh) = fit_16x9(strip_slot_w, strip_budget);
+            let strip_y = gap * 2 + main_budget + strip_budget.saturating_sub(sh) / 2;
             for i in 0..(n - 1) {
+                let slot_x = gap + i as u32 * (strip_slot_w + gap);
                 cells.push(Cell {
-                    x: gap + i as u32 * (strip_w + gap),
-                    y: gap * 2 + main_h,
-                    w: strip_w,
-                    h: strip_h,
+                    x: slot_x + strip_slot_w.saturating_sub(sw) / 2,
+                    y: strip_y,
+                    w: sw,
+                    h: sh,
                 });
             }
             cells
         }
     }
+}
+
+fn round_alpha_geq(radius: u32) -> String {
+    let r = radius.max(8);
+    // Transparent outside a rounded-rect; opaque inside.
+    format!(
+        "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(gt(abs(W/2-X),W/2-{r})*gt(abs(H/2-Y),H/2-{r}),if(lte(hypot(abs(W/2-X)-(W/2-{r}),abs(H/2-Y)-(H/2-{r})),{r}),255,0),255)'"
+    )
+}
+
+fn round_tile_alpha(input: &str, output: &str, radius: u32) -> String {
+    format!(
+        "[{input}]format=rgba,{alpha}[{output}]",
+        input = input,
+        alpha = round_alpha_geq(radius),
+        output = output
+    )
+}
+
+fn escape_drawtext(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\\' => "\\\\".into(),
+            ':' => "\\:".into(),
+            '\'' => "\u{2019}".into(), // typographic apostrophe avoids quote breakage
+            '%' => "%%".into(),
+            c if c.is_control() => "".into(),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 fn enable_expr_for(intervals: &[PresenceInterval], pid: &str, duration_ms: u64) -> String {
