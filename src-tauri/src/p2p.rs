@@ -1297,8 +1297,8 @@ pub async fn send_file_on(
         offset += n as u64;
         since_persist += n as u64;
         emit(offset, "sending");
-        // Persist resume cursor every ~8 MiB so a drop mid-podcast can continue.
-        if since_persist >= 8 * 1024 * 1024 {
+        // Persist resume cursor every ~2 MiB so a drop mid-podcast can continue.
+        if since_persist >= 2 * 1024 * 1024 {
             since_persist = 0;
             if let Some((id, name)) = progress_key.as_ref() {
                 let _ = crate::transfer_queue::update_offset(id, name, offset);

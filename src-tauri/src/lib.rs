@@ -1549,6 +1549,53 @@ fn guest_track_paths(dir: &PathBuf, participant_id: &str) -> Result<Vec<PathBuf>
         .collect())
 }
 
+fn enqueue_track_return_inner(
+    state: &AppState,
+    local_session_id: String,
+    host_session_id: String,
+    participant_id: String,
+    invite: String,
+) -> Result<transfer_queue::PendingTransfer, String> {
+    let dir = resolve_session_dir(state, &local_session_id)?;
+    let paths = guest_track_paths(&dir, &participant_id)?;
+    if paths.is_empty() {
+        return Err("No local audio/video tracks found to queue".into());
+    }
+    let mut file_names = Vec::new();
+    let mut file_sizes = std::collections::HashMap::new();
+    for path in &paths {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("track.bin")
+            .to_string();
+        let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        file_sizes.insert(name.clone(), len);
+        file_names.push(name);
+    }
+    let id = format!("{host_session_id}:{participant_id}");
+    let item = transfer_queue::PendingTransfer {
+        id: id.clone(),
+        host_session_id,
+        participant_id,
+        invite,
+        local_session_id,
+        file_names,
+        file_sizes,
+        offsets: Default::default(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        updated_at: Some(chrono::Utc::now().to_rfc3339()),
+        attempts: 0,
+        last_error: None,
+    };
+    transfer_queue::enqueue(item)?;
+    // Return the merged row (preserves prior resume offsets).
+    Ok(transfer_queue::list_pending()
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| "Failed to read transfer queue".to_string())?)
+}
+
 /// Guest: enqueue local HQ tracks for durable delivery (survives leaving the lobby).
 #[tauri::command]
 fn enqueue_track_return(
@@ -1558,28 +1605,13 @@ fn enqueue_track_return(
     participant_id: String,
     invite: String,
 ) -> Result<transfer_queue::PendingTransfer, String> {
-    let dir = resolve_session_dir(&state, &local_session_id)?;
-    let paths = guest_track_paths(&dir, &participant_id)?;
-    if paths.is_empty() {
-        return Err("No local audio/video tracks found to queue".into());
-    }
-    let file_names = paths
-        .iter()
-        .filter_map(|p| p.file_name()?.to_str().map(|s| s.to_string()))
-        .collect::<Vec<_>>();
-    let item = transfer_queue::PendingTransfer {
-        id: format!("{host_session_id}:{participant_id}"),
+    enqueue_track_return_inner(
+        &state,
+        local_session_id,
         host_session_id,
         participant_id,
         invite,
-        local_session_id,
-        file_names,
-        offsets: Default::default(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        last_error: None,
-    };
-    transfer_queue::enqueue(item.clone())?;
-    Ok(item)
+    )
 }
 
 #[tauri::command]
@@ -1587,32 +1619,27 @@ fn list_pending_transfers() -> Vec<transfer_queue::PendingTransfer> {
     transfer_queue::list_pending()
 }
 
-/// Guest: push tracks now (live session if connected, else reconnect with purpose=transfer).
-#[tauri::command]
-async fn return_local_tracks(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    participant_id: String,
-    invite: Option<String>,
-    host_session_id: Option<String>,
+async fn push_tracks_once(
+    state: &Arc<AppState>,
+    session_id: &str,
+    participant_id: &str,
+    invite: Option<&str>,
+    pending_id: &str,
 ) -> Result<Vec<String>, String> {
-    let dir = resolve_session_dir(&state, &session_id)?;
-    let paths = guest_track_paths(&dir, &participant_id)?;
+    let dir = resolve_session_dir(state, session_id)?;
+    let paths = guest_track_paths(&dir, participant_id)?;
     if paths.is_empty() {
         return Err("No local audio/video tracks found to send".into());
     }
 
-    let pending_id = host_session_id
-        .as_ref()
-        .map(|h| format!("{h}:{participant_id}"))
-        .unwrap_or_else(|| format!("{session_id}:{participant_id}"));
-    let offsets = transfer_queue::list_pending()
+    let pending = transfer_queue::list_pending()
         .into_iter()
-        .find(|p| p.id == pending_id)
-        .map(|p| p.offsets)
+        .find(|p| p.id == pending_id);
+    let offsets = pending
+        .as_ref()
+        .map(|p| p.offsets.clone())
         .unwrap_or_default();
 
-    // Prefer the live lobby connection; otherwise dial transfer-only.
     let live = state
         .guest_conn
         .lock()
@@ -1623,18 +1650,23 @@ async fn return_local_tracks(
         (None, None, None, send)
     } else {
         let invite = invite
-            .filter(|s| !s.trim().is_empty())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .ok_or_else(|| {
-                "Not connected. Keep the host studio open and retry with the invite, or share files from your Recordings folder."
-                    .to_string()
+                "Host studio isn’t reachable and no invite is saved. Ask the host to reopen the studio, then tap Resume sync.".to_string()
             })?;
-        let ticket = p2p::decode_ticket(&invite)?;
+        let ticket = p2p::decode_ticket(invite)?;
         let stream = p2p::join_for_transfer(
             &ticket,
-            participant_id.clone(),
-            participant_id.clone(),
+            participant_id.to_string(),
+            participant_id.to_string(),
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            format!(
+                "Couldn’t reconnect to the host ({e}). Keep their studio open, then tap Resume sync — upload continues from where it stopped."
+            )
+        })?;
         let p2p::PeerStream {
             _endpoint,
             _conn,
@@ -1655,7 +1687,20 @@ async fn return_local_tracks(
         sizes.push(len);
     }
     let grand_total: u64 = sizes.iter().sum::<u64>().max(1);
+    // Count already-finished files toward overall progress.
     let mut completed_before: u64 = 0;
+    for (idx, path) in paths.iter().enumerate() {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("track.bin");
+        let file_size = sizes.get(idx).copied().unwrap_or(0);
+        let resume = offsets.get(name).copied().unwrap_or(0);
+        if resume >= file_size && file_size > 0 {
+            completed_before = completed_before.saturating_add(file_size);
+        }
+    }
+
     let mut sent = Vec::new();
     for (idx, path) in paths.iter().enumerate() {
         let name = path
@@ -1665,12 +1710,16 @@ async fn return_local_tracks(
             .to_string();
         let resume = offsets.get(&name).copied().unwrap_or(0);
         let file_size = sizes.get(idx).copied().unwrap_or(0);
+        if resume >= file_size && file_size > 0 {
+            sent.push(name);
+            continue;
+        }
         match p2p::send_file_on(
             send.clone(),
-            &participant_id,
+            participant_id,
             path,
             resume,
-            Some((pending_id.clone(), name.clone())),
+            Some((pending_id.to_string(), name.clone())),
             Some((
                 state.transfer_tx.clone(),
                 completed_before,
@@ -1684,13 +1733,106 @@ async fn return_local_tracks(
                 sent.push(name);
             }
             Err(e) => {
-                let _ = transfer_queue::set_error(&pending_id, e.clone());
-                return Err(e);
+                return Err(format!(
+                    "Upload interrupted at {} ({e}). Your files are safe — tap Resume sync to continue from {}.",
+                    name,
+                    humansize_bytes(resume)
+                ));
             }
         }
     }
-    let _ = transfer_queue::remove(&pending_id);
     Ok(sent)
+}
+
+fn humansize_bytes(n: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let x = n as f64;
+    if x >= GB {
+        format!("{:.2} GB", x / GB)
+    } else if x >= MB {
+        format!("{:.1} MB", x / MB)
+    } else if x >= KB {
+        format!("{:.0} KB", x / KB)
+    } else {
+        format!("{n} B")
+    }
+}
+
+/// Guest: push tracks now (live session if connected, else reconnect with purpose=transfer).
+/// Retries a few times so brief host blips don't force a manual restart.
+#[tauri::command]
+async fn return_local_tracks(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    participant_id: String,
+    invite: Option<String>,
+    host_session_id: Option<String>,
+) -> Result<Vec<String>, String> {
+    let pending_id = host_session_id
+        .as_ref()
+        .map(|h| format!("{h}:{participant_id}"))
+        .unwrap_or_else(|| format!("{session_id}:{participant_id}"));
+
+    // Ensure a durable queue row exists (and refresh file sizes) before sending.
+    if let Some(host_sid) = host_session_id.clone() {
+        let invite_s = invite.clone().unwrap_or_default();
+        let _ = enqueue_track_return_inner(
+            &state,
+            session_id.clone(),
+            host_sid,
+            participant_id.clone(),
+            invite_s,
+        );
+    }
+
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut last_err = String::new();
+    for attempt in 1..=MAX_ATTEMPTS {
+        let _ = transfer_queue::mark_attempt(&pending_id);
+        let _ = state.transfer_tx.send(p2p::TransferEvent {
+            participant_id: participant_id.clone(),
+            file_name: String::new(),
+            status: if attempt == 1 {
+                "sending".into()
+            } else {
+                format!("retry:{attempt}")
+            },
+            bytes_received: 0,
+            total_bytes: 0,
+            overall_bytes: 0,
+            overall_total: 0,
+        });
+
+        match push_tracks_once(
+            &state,
+            &session_id,
+            &participant_id,
+            invite.as_deref(),
+            &pending_id,
+        )
+        .await
+        {
+            Ok(sent) => {
+                let _ = transfer_queue::remove(&pending_id);
+                return Ok(sent);
+            }
+            Err(e) => {
+                last_err = e.clone();
+                let _ = transfer_queue::set_error(&pending_id, e);
+                if attempt < MAX_ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        700 * u64::from(attempt),
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+    Err(format!(
+        "{last_err} (tried {MAX_ATTEMPTS} times). Leave this page open or retry from Recordings anytime — resume picks up mid-file."
+    ))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

@@ -1097,6 +1097,21 @@ a {
   align-items: stretch;
 }
 
+.rs-pending-item.is-failed {
+  border-color: color-mix(in srgb, var(--record) 35%, var(--hairline));
+}
+
+.rs-pending-item.is-busy {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--hairline));
+}
+
+.rs-pending-resume {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
 .rs-pending-item-head {
   display: flex;
   flex-wrap: wrap;

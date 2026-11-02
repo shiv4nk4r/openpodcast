@@ -31,8 +31,33 @@ type PendingTransfer = {
   invite: string;
   local_session_id: string;
   file_names: string[];
+  file_sizes?: Record<string, number>;
+  offsets?: Record<string, number>;
+  attempts?: number;
+  updated_at?: string | null;
   last_error: string | null;
 };
+
+function pendingResumeStats(item: PendingTransfer): TransferStats {
+  const sizes = item.file_sizes ?? {};
+  const offsets = item.offsets ?? {};
+  const names =
+    item.file_names.length > 0
+      ? item.file_names
+      : Array.from(new Set([...Object.keys(sizes), ...Object.keys(offsets)]));
+  let total = 0;
+  let bytes = 0;
+  for (const name of names) {
+    const size = sizes[name] ?? 0;
+    const off = offsets[name] ?? 0;
+    total += size;
+    bytes += size > 0 ? Math.min(off, size) : off;
+  }
+  total = Math.max(1, total || bytes || 1);
+  bytes = Math.min(total, bytes);
+  const pct = Math.min(100, (bytes / total) * 100);
+  return { bytes, total, pct, bytesPerSec: 0, etaSec: null };
+}
 
 type SyncProgress = {
   sessionId: string;
@@ -329,15 +354,22 @@ export default function Dashboard() {
     if (activeSyncSession.current) return;
     const sid = item.local_session_id;
     activeSyncSession.current = sid;
-    samplesRef.current[sid] = [];
+    const seed = pendingResumeStats(item);
+    samplesRef.current[sid] = [
+      { bytes: seed.bytes, total: seed.total, at: Date.now() },
+    ];
     setSyncProgress((prev) => ({
       ...prev,
       [sid]: {
         sessionId: sid,
-        bytes: 0,
-        total: 1,
-        samples: [],
+        bytes: seed.bytes,
+        total: seed.total,
+        samples: samplesRef.current[sid],
         status: "sending",
+        fileName:
+          seed.bytes > 0
+            ? `Resuming from ${Math.round(seed.pct)}%…`
+            : undefined,
       },
     }));
     try {
@@ -350,7 +382,7 @@ export default function Dashboard() {
       setSyncedIds((prev) => ({ ...prev, [sid]: true }));
       setSyncProgress((prev) => {
         const cur = prev[sid];
-        const total = Math.max(1, cur?.total ?? 1);
+        const total = Math.max(1, cur?.total ?? seed.total);
         return {
           ...prev,
           [sid]: {
@@ -369,17 +401,14 @@ export default function Dashboard() {
         ...prev,
         [sid]: {
           sessionId: sid,
-          bytes: prev[sid]?.bytes ?? 0,
-          total: prev[sid]?.total ?? 1,
+          bytes: prev[sid]?.bytes ?? seed.bytes,
+          total: prev[sid]?.total ?? seed.total,
           samples: prev[sid]?.samples ?? [],
           status: "error",
           error: msg,
         },
       }));
       await refreshPending();
-      alert(
-        `${msg}\n\nHost must still have the studio open. Your files stay on this computer — tap Sync to host again to resume.`,
-      );
     } finally {
       activeSyncSession.current = null;
     }
@@ -390,8 +419,15 @@ export default function Dashboard() {
     const prog = syncProgress[sessionId];
     const done = Boolean(syncedIds[sessionId] && !pending) || prog?.status === "done";
     const busy = prog?.status === "sending";
-    const failed = prog?.status === "error";
-    const stats = statsFor(prog, done);
+    const failed = prog?.status === "error" || Boolean(pending?.last_error && !busy && !done);
+    const resume = pending ? pendingResumeStats(pending) : null;
+    const stats = done
+      ? statsFor(prog, true)
+      : busy || prog
+        ? statsFor(prog, false)
+        : resume
+          ? resume
+          : statsFor(undefined, false);
     const frac = done ? 1 : stats.pct / 100;
     const title = busy
       ? `Syncing — ${Math.round(stats.pct)}%`
@@ -399,10 +435,12 @@ export default function Dashboard() {
         ? "Synced to host"
         : pending
           ? pending.last_error
-            ? `Sync to host (resume) — ${pending.last_error}`
-            : "Sync to host"
+            ? `Resume sync — ${pending.last_error}`
+            : resume && resume.bytes > 0
+              ? `Resume sync (${Math.round(resume.pct)}% already sent)`
+              : "Sync to host"
           : "Nothing queued to sync";
-    return { pending, prog, done, busy, failed, frac, title, stats };
+    return { pending, prog, done, busy, failed, frac, title, stats, resume };
   }
 
   return (
@@ -436,57 +474,78 @@ export default function Dashboard() {
         <p className="rs-lobby-eyebrow">Your library</p>
         <h1 className="rs-lobby-title">Past recordings</h1>
         <p className="rs-rec-sub">
-          Takes saved on this machine. Use{" "}
-          <strong>Sync to host</strong> to send or resume full-quality guest
-          video while their studio is open.
+          Takes saved on this machine. Interrupted guest uploads stay queued —
+          open <strong>Resume sync</strong> anytime while the host studio is up.
         </p>
 
-        {orphanPending.length > 0 && (
+        {pendingTransfers.length > 0 && (
           <section className="rs-pending-transfers">
-            <h2>Ready to sync</h2>
+            <h2>
+              {pendingTransfers.some((p) => (p.offsets && Object.keys(p.offsets).length) || p.last_error)
+                ? "Uploads to resume"
+                : "Ready to sync"}
+            </h2>
             <p>
-              These takes are saved locally but not in the grid yet — sync them
-              to the host.
+              Your full-quality files stay on this computer. If the host drops
+              mid-send, tap Resume — we continue from the last saved byte.
+              {orphanPending.length > 0
+                ? " Some takes below aren’t in the library grid yet."
+                : ""}
             </p>
             <ul className="rs-pending-list">
-              {orphanPending.map((item) => {
+              {pendingTransfers.map((item) => {
                 const ui = syncUiForSession(item.local_session_id);
                 const fileCount = Array.isArray(item.file_names)
                   ? item.file_names.length
                   : 0;
+                const sessionName =
+                  sessions.find((s) => s.id === item.local_session_id)?.name ??
+                  "Guest take";
+                const err = ui.prog?.error || item.last_error;
                 return (
-                  <li key={item.id} className="rs-pending-item is-stack">
+                  <li
+                    key={item.id}
+                    className={`rs-pending-item is-stack${ui.failed ? " is-failed" : ""}${ui.busy ? " is-busy" : ""}`}
+                  >
                     <div className="rs-pending-item-head">
                       <div>
-                        <strong>
-                          {fileCount} file
-                          {fileCount === 1 ? "" : "s"}
-                        </strong>
+                        <strong>{sessionName}</strong>
                         <span>
-                          {ui.busy || ui.failed
-                            ? ui.prog?.fileName || "Uploading…"
-                            : item.last_error || "Waiting to sync"}
+                          {fileCount} file{fileCount === 1 ? "" : "s"}
+                          {ui.resume && ui.resume.bytes > 0
+                            ? ` · ${Math.round(ui.resume.pct)}% already on host`
+                            : ""}
+                          {item.attempts ? ` · ${item.attempts} attempt${item.attempts === 1 ? "" : "s"}` : ""}
                         </span>
                       </div>
                       <div className="rs-pending-actions">
-                        <SyncRing
-                          frac={ui.frac}
-                          busy={!!ui.busy}
-                          done={!!ui.done}
-                          title={ui.title}
-                          disabled={!ui.pending && !ui.busy}
+                        <button
+                          type="button"
+                          className="btn btn-primary rs-pending-resume"
+                          disabled={!!ui.busy}
                           onClick={() => void syncToHost(item)}
-                        />
+                        >
+                          <IconUpload size={15} stroke={1.75} />
+                          {ui.busy
+                            ? "Sending…"
+                            : ui.resume && ui.resume.bytes > 0
+                              ? "Resume sync"
+                              : "Sync to host"}
+                        </button>
                       </div>
                     </div>
-                    {(ui.busy || ui.failed || ui.done) && (
-                      <TransferProgressBar
-                        stats={ui.stats}
-                        done={ui.done}
-                        error={ui.failed ? ui.prog?.error : null}
-                        label="Syncing to host"
-                      />
-                    )}
+                    <TransferProgressBar
+                      stats={ui.stats}
+                      done={ui.done}
+                      error={ui.busy ? null : err}
+                      label={
+                        ui.busy
+                          ? ui.prog?.fileName || "Reconnecting & sending…"
+                          : ui.resume && ui.resume.bytes > 0
+                            ? "Paused — ready to resume"
+                            : "Waiting to sync"
+                      }
+                    />
                   </li>
                 );
               })}

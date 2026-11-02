@@ -269,7 +269,13 @@ export const api = {
     participantId: string,
     invite: string,
   ) =>
-    invoke<{ id: string }>("enqueue_track_return", {
+    invoke<{
+      id: string;
+      file_names: string[];
+      file_sizes?: Record<string, number>;
+      offsets?: Record<string, number>;
+      last_error: string | null;
+    }>("enqueue_track_return", {
       localSessionId,
       hostSessionId,
       participantId,
@@ -284,6 +290,10 @@ export const api = {
         invite: string;
         local_session_id: string;
         file_names: string[];
+        file_sizes?: Record<string, number>;
+        offsets?: Record<string, number>;
+        attempts?: number;
+        updated_at?: string | null;
         last_error: string | null;
       }[]
     >("list_pending_transfers"),

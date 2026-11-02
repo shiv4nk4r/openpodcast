@@ -1124,17 +1124,60 @@ export default function Recording() {
     const hostSid = hostSessionIdRef.current || active.sessionId;
     const invite = active.invite || "";
     setTransferStatus("sending");
-    setTransferMsg("Sending your high-quality video to the host…");
+    setTransferMsg("Connecting to host and sending full-quality tracks…");
     setResumingTransfer(true);
-    xferSamplesRef.current = [];
-    setXferFile(null);
+
+    // Seed progress from any prior resume offsets so the bar doesn't reset to 0%.
+    let seedBytes = 0;
+    let seedTotal = 1;
+    try {
+      const queued = await api.enqueueTrackReturn(
+        active.sessionId,
+        hostSid,
+        active.participantId,
+        invite,
+      );
+      const pending = (await api.listPendingTransfers()).find(
+        (p) => p.id === queued.id,
+      );
+      if (pending) {
+        const sizes = pending.file_sizes ?? {};
+        const offsets = pending.offsets ?? {};
+        const names = pending.file_names?.length
+          ? pending.file_names
+          : Object.keys(sizes);
+        seedTotal = 0;
+        seedBytes = 0;
+        for (const name of names) {
+          const size = sizes[name] ?? 0;
+          const off = offsets[name] ?? 0;
+          seedTotal += size;
+          seedBytes += size > 0 ? Math.min(off, size) : off;
+        }
+        seedTotal = Math.max(1, seedTotal || seedBytes || 1);
+        seedBytes = Math.min(seedTotal, seedBytes);
+      }
+    } catch {
+      /* enqueue optional if files missing */
+    }
+
+    xferSamplesRef.current =
+      seedBytes > 0
+        ? [{ bytes: seedBytes, total: seedTotal, at: Date.now() }]
+        : [];
+    setXferFile(
+      seedBytes > 0
+        ? `Resuming from ${Math.round((seedBytes / seedTotal) * 100)}%…`
+        : null,
+    );
     setXferStats({
-      bytes: 0,
-      total: 1,
-      pct: 0,
+      bytes: seedBytes,
+      total: seedTotal,
+      pct: Math.min(100, (seedBytes / seedTotal) * 100),
       bytesPerSec: 0,
       etaSec: null,
     });
+    setUploadFrac(Math.max(0.05, seedBytes / seedTotal));
 
     let unlisten: (() => void) | undefined;
     xferListeningRef.current = true;
@@ -1150,6 +1193,13 @@ export default function Recording() {
       }>("studio-transfer", (ev) => {
         if (!xferListeningRef.current || !ev.payload) return;
         const p = ev.payload;
+        if (typeof p.status === "string" && p.status.startsWith("retry:")) {
+          const n = p.status.slice("retry:".length);
+          setTransferMsg(
+            `Host blip — reconnecting (attempt ${n}/3). Progress is saved.`,
+          );
+          return;
+        }
         const total = Math.max(1, p.overall_total || p.total_bytes || 1);
         const bytes = Math.min(total, p.overall_bytes || p.bytes_received || 0);
         xferSamplesRef.current = pushSample(
@@ -1161,18 +1211,19 @@ export default function Recording() {
         setXferStats(stats);
         setXferFile(p.file_name || null);
         setUploadFrac(Math.max(0.05, stats.pct / 100));
+        if (stats.bytes > 0) {
+          setTransferMsg(
+            p.file_name
+              ? `Sending ${p.file_name}…`
+              : "Sending your high-quality video to the host…",
+          );
+        }
       });
     } catch {
       /* browser preview */
     }
 
     try {
-      await api.enqueueTrackReturn(
-        active.sessionId,
-        hostSid,
-        active.participantId,
-        invite,
-      );
       await api.returnLocalTracks(
         active.sessionId,
         active.participantId,
@@ -1190,11 +1241,10 @@ export default function Recording() {
       setTransferMsg("Host has your full-quality tracks.");
     } catch (e) {
       console.error("Guest track return failed", e);
-      setUploadFrac(0.7);
       setTransferStatus("failed");
       setTransferMsg(
         String(e).replace(/^Error:\s*/i, "") ||
-          "Could not reach the host. Your file is safe on this Mac.",
+          "Could not reach the host. Your files are safe here — resume from Recordings anytime.",
       );
     } finally {
       xferListeningRef.current = false;
@@ -2063,8 +2113,10 @@ export default function Recording() {
                 ? transferStatus === "done"
                   ? "Sent to host"
                   : transferStatus === "failed"
-                    ? "Saved locally — send still needed"
-                    : "Finishing your recording"
+                    ? "Saved locally — resume when host is back"
+                    : transferStatus === "sending"
+                      ? "Uploading to host"
+                      : "Finishing your recording"
                 : transferStatus === "done"
                   ? "Meeting ended — recording saved"
                   : "Meeting ended — finishing up"}
@@ -2072,8 +2124,8 @@ export default function Recording() {
             <p style={{ color: "var(--text-muted)" }}>
               {transferMsg ||
                 (active.role === "guest"
-                  ? "Camera and mic are off. Your full-quality video stays on this computer until the host has a copy."
-                  : "Camera and mic are off. Guest high-quality videos arrive here when they finish sending.")}
+                  ? "Camera and mic are off. Your full-quality video stays on this computer until the host has a copy. If the link drops, we keep your place and you can resume."
+                  : "Camera and mic are off. Guest high-quality videos arrive here when they finish sending — keep the studio open so they can reconnect.")}
             </p>
             {active.role === "guest" &&
             (transferStatus === "sending" ||
