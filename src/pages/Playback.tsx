@@ -91,6 +91,8 @@ export default function Playback() {
   const [deleting, setDeleting] = useState(false);
   const [previewLayout, setPreviewLayout] = useState<RenderLayout>("dynamic");
   const [exportLayout, setExportLayout] = useState<RenderLayout>("dynamic");
+  const [exportResolution, setExportResolution] = useState("1080p");
+  const [exportFps, setExportFps] = useState(30);
   const [presenceEvents, setPresenceEvents] = useState<PresenceEvent[]>([]);
   const [offsetsMs, setOffsetsMs] = useState<Record<string, number>>({});
   const [renderOpen, setRenderOpen] = useState(false);
@@ -488,6 +490,8 @@ export default function Playback() {
 
   function openRenderDialog() {
     setExportLayout(previewLayout);
+    setExportResolution(session?.resolution || "1080p");
+    setExportFps(session?.frame_rate || 30);
     setRenderMsg(null);
     setRenderOpen(true);
   }
@@ -499,10 +503,13 @@ export default function Playback() {
     setRenderMsg(
       mode === "audio"
         ? "Mixing audio podcast… this can take a minute."
-        : "Rendering video podcast… this can take a minute.",
+        : `Rendering ${exportResolution} / ${exportFps}fps video… this can take a minute.`,
     );
     try {
-      const path = await api.renderSession(id, exportLayout, mode);
+      const path = await api.renderSession(id, exportLayout, mode, {
+        resolution: exportResolution,
+        fps: exportFps,
+      });
       setRenderMsg(`Saved: ${path}`);
       try {
         await api.revealSessionFolder(id);
@@ -802,11 +809,15 @@ export default function Playback() {
     <RenderPodcastDialog
       open={renderOpen}
       layout={exportLayout}
+      resolution={exportResolution}
+      fps={exportFps}
       busy={rendering}
       busyMode={renderBusyMode}
       status={renderMsg}
       hasPresence={hasPresence}
       onLayoutChange={setExportLayout}
+      onResolutionChange={setExportResolution}
+      onFpsChange={setExportFps}
       onClose={() => {
         if (!rendering) setRenderOpen(false);
       }}

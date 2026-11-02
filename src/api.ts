@@ -162,8 +162,15 @@ export const api = {
     sessionId: string,
     layout: string,
     mode: "video" | "audio" = "video",
+    opts?: { resolution?: string; fps?: number },
   ) =>
-    invoke<string>("render_session", { sessionId, layout, mode }),
+    invoke<string>("render_session", {
+      sessionId,
+      layout,
+      mode,
+      resolution: opts?.resolution ?? null,
+      fps: opts?.fps ?? null,
+    }),
   discardSession: (sessionId: string) =>
     invoke<void>("discard_session", { sessionId }),
   /** Permanently delete a saved recording and its local files. */

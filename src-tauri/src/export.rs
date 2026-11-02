@@ -16,6 +16,40 @@ pub struct RenderProgress {
     pub phase: String,
 }
 
+/// Output quality for composed video renders.
+#[derive(Debug, Clone)]
+pub struct RenderVideoOpts {
+    pub resolution: String,
+    pub fps: u32,
+}
+
+impl Default for RenderVideoOpts {
+    fn default() -> Self {
+        Self {
+            resolution: "1080p".into(),
+            fps: 30,
+        }
+    }
+}
+
+impl RenderVideoOpts {
+    pub fn size(&self) -> (u32, u32) {
+        match self.resolution.as_str() {
+            "720p" => (1280, 720),
+            "1440p" => (2560, 1440),
+            "2160p" | "4K" | "4k" => (3840, 2160),
+            _ => (1920, 1080),
+        }
+    }
+
+    pub fn fps(&self) -> u32 {
+        match self.fps {
+            24 | 25 | 30 | 50 | 60 => self.fps,
+            _ => 30,
+        }
+    }
+}
+
 pub type ProgressCallback<'a> = Option<&'a mut dyn FnMut(RenderProgress)>;
 
 fn emit_progress(cb: &mut ProgressCallback<'_>, progress: RenderProgress) {
@@ -43,11 +77,84 @@ struct PresenceInterval {
 #[derive(Clone, Debug)]
 struct TrackMedia {
     participant_id: String,
-    #[allow(dead_code)]
     name: String,
+    role: String,
     video: Option<PathBuf>,
     audio: Option<PathBuf>,
     offset_ms: u64,
+}
+
+/// Dark studio stage tokens — match `[data-theme="dark"]` preview chrome.
+struct StudioChrome {
+    /// Page / canvas background (`--page`)
+    bg: &'static str,
+    /// Soft tile shadow opacity
+    shadow_alpha: f64,
+    pad: u32,
+    gap: u32,
+    radius: u32,
+    chip_pad_x: u32,
+    chip_pad_y: u32,
+    chip_inset: u32,
+    chip_fontsize: u32,
+    fontfile: Option<PathBuf>,
+}
+
+impl StudioChrome {
+    fn for_size(w: u32) -> Self {
+        let scale = w as f64 / 1920.0;
+        let px = |v: f64| -> u32 { (v * scale).round().max(1.0) as u32 };
+        Self {
+            bg: "0x0b0b0d",
+            shadow_alpha: 0.40,
+            pad: px(20.0),
+            gap: px(12.0),
+            radius: px(18.0).clamp(10, 40),
+            chip_pad_x: px(10.0).max(6),
+            chip_pad_y: px(5.0).max(3),
+            chip_inset: px(12.0).max(8),
+            chip_fontsize: px(14.0).clamp(11, 36),
+            fontfile: manrope_font_path(),
+        }
+    }
+
+    fn font_arg(&self) -> String {
+        match &self.fontfile {
+            Some(p) => format!(":fontfile={}", escape_drawtext_path(p)),
+            None => String::new(),
+        }
+    }
+}
+
+fn manrope_font_path() -> Option<PathBuf> {
+    let candidates = [
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/Manrope-SemiBold.ttf"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/Manrope-SemiBold.otf"),
+    ];
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+fn escape_drawtext_path(p: &Path) -> String {
+    // ffmpeg drawtext fontfile: escape \ and :
+    p.to_string_lossy()
+        .chars()
+        .map(|c| match c {
+            '\\' => "\\\\".into(),
+            ':' => "\\:".into(),
+            '\'' => "\\'".into(),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
+fn track_label(t: &TrackMedia) -> String {
+    let name = t.name.trim();
+    let role = t.role.trim();
+    if role.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} · {role}")
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
@@ -75,7 +182,13 @@ pub fn export_session(
 
     // Prefer a full composed render when ffmpeg is available.
     if which_ffmpeg().is_some() {
-        match render_final_video(session_dir, &req.layout, &export_dir, &mut None) {
+        match render_final_video(
+            session_dir,
+            &req.layout,
+            &export_dir,
+            &RenderVideoOpts::default(),
+            &mut None,
+        ) {
             Ok(master) => {
                 let meta = serde_json::json!({
                     "layout": req.layout,
@@ -183,6 +296,7 @@ pub fn render_final_video(
     session_dir: &Path,
     layout: &str,
     out_dir: &Path,
+    opts: &RenderVideoOpts,
     on_progress: &mut ProgressCallback<'_>,
 ) -> Result<PathBuf, String> {
     let ffmpeg = which_ffmpeg().ok_or_else(|| {
@@ -196,6 +310,8 @@ pub fn render_final_video(
     let duration_ms = (duration_secs * 1000.0).round() as u64;
     let intervals = intervals_from_events(&timeline.presence_events, duration_ms);
     let tracks = discover_tracks(session_dir, &timeline);
+    let (out_w, out_h) = opts.size();
+    let fps = opts.fps();
 
     if tracks.is_empty() {
         return Err("No audio/video tracks found to render".into());
@@ -203,55 +319,7 @@ pub fn render_final_video(
 
     let layout = normalize_layout(layout);
     let out = out_dir.join(format!("final-{layout}.mp4"));
-
-    // Single-track fast path
-    if tracks.len() == 1 {
-        let t = &tracks[0];
-        let mut args = vec!["-y".into()];
-        if let Some(v) = &t.video {
-            if t.offset_ms > 0 {
-                args.push("-itsoffset".into());
-                args.push(format!("{:.3}", t.offset_ms as f64 / 1000.0));
-            }
-            args.push("-i".into());
-            args.push(v.to_string_lossy().into());
-        } else {
-            args.push("-f".into());
-            args.push("lavfi".into());
-            args.push("-i".into());
-            args.push(format!(
-                "color=c=0x111827:s=1920x1080:d={duration_secs:.3}:r=30"
-            ));
-        }
-        if let Some(a) = &t.audio {
-            args.push("-i".into());
-            args.push(a.to_string_lossy().into());
-            // Downmix odd layouts (e.g. 3.0 from some USB mics) to stereo AAC.
-            args.push("-filter:a".into());
-            args.push(
-                "aresample=48000:ocl=stereo,aformat=sample_fmts=fltp:channel_layouts=stereo"
-                    .into(),
-            );
-        }
-        args.push("-t".into());
-        args.push(format!("{duration_secs:.3}"));
-        args.push("-c:v".into());
-        args.push("libx264".into());
-        args.push("-pix_fmt".into());
-        args.push("yuv420p".into());
-        if t.audio.is_some() {
-            args.push("-c:a".into());
-            args.push("aac".into());
-            args.push("-b:a".into());
-            args.push("192k".into());
-            args.push("-ac".into());
-            args.push("2".into());
-        }
-        args.push("-shortest".into());
-        args.push(out.to_string_lossy().into());
-        run_ffmpeg(&ffmpeg, &args, duration_secs, on_progress)?;
-        return Ok(out);
-    }
+    let chrome = StudioChrome::for_size(out_w);
 
     let present_ids: Vec<String> = {
         let mut ids: Vec<String> = tracks.iter().map(|t| t.participant_id.clone()).collect();
@@ -301,15 +369,15 @@ pub fn render_final_video(
         return Err("No present tracks to render".into());
     }
 
-    let (w, h) = (1920u32, 1080u32);
-    let corner_r = 28u32;
+    let (w, h) = (out_w, out_h);
     let mut args: Vec<String> = vec!["-y".into()];
-    // Soft studio backdrop (matches in-app stage feel).
+    // Studio stage backdrop — matches dark preview `--page`.
     args.push("-f".into());
     args.push("lavfi".into());
     args.push("-i".into());
     args.push(format!(
-        "color=c=0x10141e:s={w}x{h}:d={duration_secs:.3}:r=30,format=rgba"
+        "color=c={bg}:s={w}x{h}:d={duration_secs:.3}:r={fps},format=rgba",
+        bg = chrome.bg
     ));
 
     let mut video_input_idx = Vec::new();
@@ -371,49 +439,82 @@ pub fn render_final_video(
         }
     }
 
-    let cells = layout_cells(layout, n, w, h);
+    let cells = layout_cells(layout, n, w, h, chrome.pad, chrome.gap);
     let mut fc: Vec<String> = Vec::new();
     // Keep alpha on the running composition so rounded tiles composite cleanly.
     let mut last_label = "base0".to_string();
     fc.push("[0:v]format=rgba[base0]".into());
     let mut vscale_i = 0usize;
+    let shadow_blur = ((14.0 * (w as f64 / 1920.0)).round() as i32).clamp(6, 28);
+    let shadow_oy = ((10.0 * (w as f64 / 1920.0)).round() as i32).max(4);
 
     for (i, t) in tracks.iter().enumerate() {
-        let Some(vin) = video_input_idx[i] else {
-            continue;
-        };
         let cell = &cells[i.min(cells.len() - 1)];
         let enable = enable_expr_for(&intervals, &t.participant_id, duration_ms);
-        let radius = corner_r.min(cell.w / 4).min(cell.h / 4).max(12);
+        let radius = chrome
+            .radius
+            .min(cell.w / 4)
+            .min(cell.h / 4)
+            .max(8);
         let fitted = format!("vf{i}");
         let rounded = format!("vr{i}");
         let shadow = format!("vs{i}");
         let named = format!("vn{i}");
-        // Cover-fit into 16:9 tile, then soft rounded alpha (studio chrome).
-        fc.push(format!(
-            "[{vin}:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,fps=30,format=rgba[{fitted}]",
-            vin = vin,
-            w = cell.w,
-            h = cell.h,
-            fitted = fitted
-        ));
+
+        if let Some(vin) = video_input_idx[i] {
+            // Cover-fit into 16:9 tile (matches `object-fit: cover`).
+            fc.push(format!(
+                "[{vin}:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,fps={fps},format=rgba[{fitted}]",
+                vin = vin,
+                w = cell.w,
+                h = cell.h,
+                fps = fps,
+                fitted = fitted
+            ));
+        } else {
+            // Cam-off / audio-only plate — matches preview `.tile .empty` gradient.
+            let empty_name = escape_drawtext(&t.name);
+            fc.push(format!(
+                "color=c=0x222226:s={cw}x{ch}:d={dur:.3}:r={fps},format=rgba,drawtext=text='{empty_name}':fontsize={fs}:fontcolor=0x8f8f98{font}:x=(w-text_w)/2:y=(h-text_h)/2[{fitted}]",
+                cw = cell.w,
+                ch = cell.h,
+                dur = duration_secs,
+                fps = fps,
+                empty_name = empty_name,
+                fs = (chrome.chip_fontsize as f64 * 1.6).round() as u32,
+                font = chrome.font_arg(),
+                fitted = fitted
+            ));
+        }
         fc.push(round_tile_alpha(&fitted, &rounded, radius));
-        // Drop shadow under the tile
+
+        // Soft drop shadow approximating CSS `--shadow` (blurred, low opacity).
         fc.push(format!(
-            "color=c=black@0.45:s={cw}x{ch}:d={dur:.3},format=rgba,{alpha},fps=30[{shadow}]",
+            "color=c=black@{alpha}:s={cw}x{ch}:d={dur:.3},format=rgba,{round_a},boxblur={blur}:{blur},fps={fps}[{shadow}]",
+            alpha = chrome.shadow_alpha,
             cw = cell.w,
             ch = cell.h,
             dur = duration_secs,
-            alpha = round_alpha_geq(radius),
+            round_a = round_alpha_geq(radius),
+            blur = shadow_blur,
+            fps = fps,
             shadow = shadow
         ));
-        let label = escape_drawtext(&t.name);
+
+        // Name chip — matches `.name-tag` (dark chip + Manrope).
+        let label = escape_drawtext(&track_label(t));
+        let chip_x = chrome.chip_inset;
+        let chip_bottom = chrome.chip_inset;
         fc.push(format!(
-            "[{rounded}]drawtext=text='{label}':fontsize={fs}:fontcolor=white:borderw=0:shadowcolor=black@0.65:shadowx=1:shadowy=1:x=22:y=h-42[{named}]",
+            "[{rounded}]drawtext=text='{label}':fontsize={fs}:fontcolor=0xf4f4f5{font}:box=1:boxcolor=0x0c0c0e@0.72:boxborderw={pad}:x={x}:y=h-text_h-{bottom}-{pad}[{named}]",
             rounded = rounded,
             label = label,
-            named = named,
-            fs = if cell.w > 700 { 30 } else { 22 }
+            fs = chrome.chip_fontsize,
+            font = chrome.font_arg(),
+            pad = chrome.chip_pad_y.max(chrome.chip_pad_x / 2),
+            x = chip_x,
+            bottom = chip_bottom,
+            named = named
         ));
 
         let after_shadow = format!("ovs{vscale_i}");
@@ -422,8 +523,8 @@ pub fn render_final_video(
             "[{base}][{shadow}]overlay={x}:{y}:eof_action=pass:format=auto:enable='{enable}'[{mid}]",
             base = last_label,
             shadow = shadow,
-            x = cell.x + 5,
-            y = cell.y + 8,
+            x = cell.x as i32,
+            y = cell.y as i32 + shadow_oy,
             enable = enable,
             mid = after_shadow
         ));
@@ -499,6 +600,8 @@ pub fn render_final_video(
     }
     args.push("-t".into());
     args.push(format!("{duration_secs:.3}"));
+    args.push("-r".into());
+    args.push(fps.to_string());
     args.push("-c:v".into());
     args.push("libx264".into());
     args.push("-pix_fmt".into());
@@ -633,29 +736,35 @@ fn fit_16x9(max_w: u32, max_h: u32) -> (u32, u32) {
     }
 }
 
-fn layout_cells(layout: &str, n: usize, w: u32, h: u32) -> Vec<Cell> {
+fn layout_cells(layout: &str, n: usize, w: u32, h: u32, pad: u32, gap: u32) -> Vec<Cell> {
     let n = n.max(1);
-    let gap = 28u32;
+    let pad = pad.max(8);
+    let gap = gap.max(8);
+    let inner_w = w.saturating_sub(pad * 2).max(320);
+    let inner_h = h.saturating_sub(pad * 2).max(180);
+    let ox = pad;
+    let oy = pad;
+
     match layout {
         "equal" => {
-            let (cols, rows) = match n {
-                1 => (1, 1),
-                2 => (2, 1),
-                3 | 4 => (2, 2),
-                _ => (3, 2),
-            };
-            let slot_w = (w - gap * (cols as u32 + 1)) / cols as u32;
-            let slot_h = (h - gap * (rows as u32 + 1)) / rows as u32;
+            // Mirror CSS `auto-fit minmax(220px, 1fr)` at export width.
+            let min_col = ((220.0 * (w as f64 / 1280.0)).round() as u32).clamp(160, 360);
+            let cols = ((inner_w + gap) / (min_col + gap)).clamp(1, n as u32);
+            let rows = ((n as u32) + cols - 1) / cols;
+            let slot_w = (inner_w - gap * cols.saturating_sub(1)) / cols;
+            let slot_h = (inner_h - gap * rows.saturating_sub(1)) / rows.max(1);
             let (tw, th) = fit_16x9(slot_w, slot_h);
+            let grid_w = cols * tw + gap * cols.saturating_sub(1);
+            let grid_h = rows * th + gap * rows.saturating_sub(1);
+            let grid_x = ox + inner_w.saturating_sub(grid_w) / 2;
+            let grid_y = oy + inner_h.saturating_sub(grid_h) / 2;
             (0..n)
                 .map(|i| {
-                    let col = (i % cols) as u32;
-                    let row = (i / cols) as u32;
-                    let slot_x = gap + col * (slot_w + gap);
-                    let slot_y = gap + row * (slot_h + gap);
+                    let col = (i as u32) % cols;
+                    let row = (i as u32) / cols;
                     Cell {
-                        x: slot_x + slot_w.saturating_sub(tw) / 2,
-                        y: slot_y + slot_h.saturating_sub(th) / 2,
+                        x: grid_x + col * (tw + gap),
+                        y: grid_y + row * (th + gap),
                         w: tw,
                         h: th,
                     }
@@ -664,30 +773,32 @@ fn layout_cells(layout: &str, n: usize, w: u32, h: u32) -> Vec<Cell> {
         }
         "dynamic" => {
             if n == 1 {
-                let (tw, th) = fit_16x9(w - gap * 2, h - gap * 2);
+                let (tw, th) = fit_16x9(inner_w, inner_h);
                 return vec![Cell {
-                    x: (w - tw) / 2,
-                    y: (h - th) / 2,
+                    x: ox + (inner_w - tw) / 2,
+                    y: oy + (inner_h - th) / 2,
                     w: tw,
                     h: th,
                 }];
             }
-            let side_slot_w = (w as f32 * 0.26) as u32;
-            let main_slot_w = w - side_slot_w - gap * 3;
-            let (main_w, main_h) = fit_16x9(main_slot_w, h - gap * 2);
+            // CSS: `1fr 0.34fr` → side ≈ 0.34/1.34 of content width.
+            let side_slot_w = ((inner_w as f64) * (0.34 / 1.34)).round() as u32;
+            let main_slot_w = inner_w.saturating_sub(side_slot_w + gap);
+            let (main_w, main_h) = fit_16x9(main_slot_w, inner_h);
             let mut cells = vec![Cell {
-                x: gap + main_slot_w.saturating_sub(main_w) / 2,
-                y: (h - main_h) / 2,
+                x: ox + main_slot_w.saturating_sub(main_w) / 2,
+                y: oy + (inner_h - main_h) / 2,
                 w: main_w,
                 h: main_h,
             }];
             let side_n = (n - 1).max(1) as u32;
-            let side_slot_h = (h - gap * (side_n + 1)) / side_n;
+            let side_slot_h = (inner_h - gap * side_n.saturating_sub(1)) / side_n;
             let (side_w, side_h) = fit_16x9(side_slot_w, side_slot_h);
+            let side_x = ox + main_slot_w + gap + side_slot_w.saturating_sub(side_w) / 2;
             for i in 0..(n - 1) {
-                let slot_y = gap + i as u32 * (side_slot_h + gap);
+                let slot_y = oy + i as u32 * (side_slot_h + gap);
                 cells.push(Cell {
-                    x: gap * 2 + main_slot_w + side_slot_w.saturating_sub(side_w) / 2,
+                    x: side_x,
                     y: slot_y + side_slot_h.saturating_sub(side_h) / 2,
                     w: side_w,
                     h: side_h,
@@ -696,33 +807,38 @@ fn layout_cells(layout: &str, n: usize, w: u32, h: u32) -> Vec<Cell> {
             cells
         }
         _ => {
-            // normal: host large, guests in a 16:9 strip along the bottom
+            // normal: host full-width 16:9 on top; guests in a bottom strip
+            // (matches flex host `1 1 100%` + guests `1 1 28%`).
             if n == 1 {
-                let (tw, th) = fit_16x9(w - gap * 2, h - gap * 2);
+                let (tw, th) = fit_16x9(inner_w, inner_h);
                 return vec![Cell {
-                    x: (w - tw) / 2,
-                    y: (h - th) / 2,
+                    x: ox + (inner_w - tw) / 2,
+                    y: oy + (inner_h - th) / 2,
                     w: tw,
                     h: th,
                 }];
             }
-            let strip_budget = (h as f32 * 0.30) as u32;
-            let main_budget = h - strip_budget - gap * 3;
-            let (main_w, main_h) = fit_16x9(w - gap * 2, main_budget);
+            let side_n = (n - 1).max(1) as u32;
+            // Guests want ~28% flex basis; size strip from that 16:9 height.
+            let guest_target_w = ((inner_w as f64) * 0.28).round() as u32;
+            let (_, guest_target_h) = fit_16x9(guest_target_w, inner_h / 2);
+            let strip_h = guest_target_h.min(inner_h / 3).max(inner_h / 5);
+            let main_budget = inner_h.saturating_sub(strip_h + gap);
+            let (main_w, main_h) = fit_16x9(inner_w, main_budget);
             let mut cells = vec![Cell {
-                x: (w - main_w) / 2,
-                y: gap + main_budget.saturating_sub(main_h) / 2,
+                x: ox + (inner_w - main_w) / 2,
+                y: oy + main_budget.saturating_sub(main_h) / 2,
                 w: main_w,
                 h: main_h,
             }];
-            let side_n = (n - 1).max(1) as u32;
-            let strip_slot_w = (w - gap * (side_n + 1)) / side_n;
-            let (sw, sh) = fit_16x9(strip_slot_w, strip_budget);
-            let strip_y = gap * 2 + main_budget + strip_budget.saturating_sub(sh) / 2;
+            let strip_slot_w = (inner_w - gap * side_n.saturating_sub(1)) / side_n;
+            let (sw, sh) = fit_16x9(strip_slot_w, strip_h);
+            let strip_total_w = side_n * sw + gap * side_n.saturating_sub(1);
+            let strip_x0 = ox + inner_w.saturating_sub(strip_total_w) / 2;
+            let strip_y = oy + main_budget + gap + strip_h.saturating_sub(sh) / 2;
             for i in 0..(n - 1) {
-                let slot_x = gap + i as u32 * (strip_slot_w + gap);
                 cells.push(Cell {
-                    x: slot_x + strip_slot_w.saturating_sub(sw) / 2,
+                    x: strip_x0 + i as u32 * (sw + gap),
                     y: strip_y,
                     w: sw,
                     h: sh,
@@ -831,10 +947,10 @@ fn intervals_from_events(events: &[PresenceEvent], duration_ms: u64) -> Vec<Pres
 
 fn discover_tracks(session_dir: &Path, timeline: &SessionTimeline) -> Vec<TrackMedia> {
     let mut by_id: HashMap<String, TrackMedia> = HashMap::new();
-    let name_by: HashMap<String, String> = timeline
+    let meta_by: HashMap<String, (&str, &str)> = timeline
         .participants
         .iter()
-        .map(|p| (p.id.clone(), p.name.clone()))
+        .map(|p| (p.id.clone(), (p.name.as_str(), p.role.as_str())))
         .collect();
 
     if let Ok(entries) = std::fs::read_dir(session_dir) {
@@ -857,12 +973,19 @@ fn discover_tracks(session_dir: &Path, timeline: &SessionTimeline) -> Vec<TrackM
             } else {
                 continue;
             };
-            let entry = by_id.entry(pid.clone()).or_insert_with(|| TrackMedia {
-                participant_id: pid.clone(),
-                name: name_by.get(&pid).cloned().unwrap_or_else(|| pid.clone()),
-                video: None,
-                audio: None,
-                offset_ms: *timeline.offsets_ms.get(&pid).unwrap_or(&0),
+            let entry = by_id.entry(pid.clone()).or_insert_with(|| {
+                let (pname, prole) = meta_by
+                    .get(&pid)
+                    .map(|(n, r)| ((*n).to_string(), (*r).to_string()))
+                    .unwrap_or_else(|| (pid.clone(), String::new()));
+                TrackMedia {
+                    participant_id: pid.clone(),
+                    name: pname,
+                    role: prole,
+                    video: None,
+                    audio: None,
+                    offset_ms: *timeline.offsets_ms.get(&pid).unwrap_or(&0),
+                }
             });
             if kind == "video" {
                 entry.video = Some(path);

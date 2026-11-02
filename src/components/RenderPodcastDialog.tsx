@@ -1,6 +1,11 @@
 import { IconMicrophone2, IconMovie } from "@tabler/icons-react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
+import { Segmented } from "./Select";
+import {
+  FRAME_RATE_OPTIONS,
+  RESOLUTION_OPTIONS,
+} from "../lib/studioQuality";
 import { formatEta } from "../lib/transferProgress";
 import type { RenderLayout } from "../types";
 
@@ -46,21 +51,29 @@ function formatClock(secs: number): string {
 export function RenderPodcastDialog({
   open,
   layout,
+  resolution,
+  fps,
   busy = false,
   busyMode = null,
   status = null,
   hasPresence = false,
   onLayoutChange,
+  onResolutionChange,
+  onFpsChange,
   onClose,
   onConfirm,
 }: {
   open: boolean;
   layout: RenderLayout;
+  resolution: string;
+  fps: number;
   busy?: boolean;
   busyMode?: RenderMode | null;
   status?: string | null;
   hasPresence?: boolean;
   onLayoutChange: (layout: RenderLayout) => void;
+  onResolutionChange: (resolution: string) => void;
+  onFpsChange: (fps: number) => void;
   onClose: () => void;
   onConfirm: (mode: RenderMode) => void | Promise<void>;
 }) {
@@ -102,6 +115,8 @@ export function RenderPodcastDialog({
   const barWidth = Math.max(pct, progress && progress.out_time_secs > 0 ? 1.5 : 0);
   const modeLabel =
     busyMode === "audio" ? "audio podcast" : "video podcast";
+  const resLabel =
+    RESOLUTION_OPTIONS.find((o) => o.value === resolution)?.label ?? resolution;
 
   return (
     <div
@@ -125,7 +140,9 @@ export function RenderPodcastDialog({
               Rendering {busyMode === "audio" ? "audio" : "video"}…
             </h3>
             <p id="render-podcast-desc" className="render-podcast-copy">
-              Encoding your {modeLabel}. Keep this window open until it finishes.
+              Encoding your {modeLabel}
+              {busyMode === "video" ? ` at ${resLabel} / ${fps}fps` : ""}. Keep
+              this window open until it finishes.
             </p>
 
             <div
@@ -166,8 +183,8 @@ export function RenderPodcastDialog({
             </h3>
             {!done && (
               <p id="render-podcast-desc" className="render-podcast-copy">
-                Pick a video layout for the stage export, then choose video or
-                audio-only.
+                Pick layout and output quality for the stage export, then choose
+                video or audio-only.
                 {hasPresence
                   ? " Join and leave times are baked into the export automatically."
                   : ""}
@@ -192,6 +209,27 @@ export function RenderPodcastDialog({
                       <span>{opt.description}</span>
                     </button>
                   ))}
+                </div>
+
+                <div className="render-podcast-quality">
+                  <Segmented
+                    label="Resolution"
+                    value={resolution}
+                    onChange={onResolutionChange}
+                    options={RESOLUTION_OPTIONS.map((o) => ({
+                      value: o.value,
+                      label: o.label,
+                    }))}
+                  />
+                  <Segmented
+                    label="Frame rate"
+                    value={String(fps)}
+                    onChange={(v) => onFpsChange(Number(v))}
+                    options={FRAME_RATE_OPTIONS.map((o) => ({
+                      value: o.value,
+                      label: o.label.replace(" fps", ""),
+                    }))}
+                  />
                 </div>
               </>
             )}

@@ -1186,6 +1186,8 @@ async fn render_session(
     session_id: String,
     layout: String,
     mode: Option<String>,
+    resolution: Option<String>,
+    fps: Option<u32>,
 ) -> Result<String, String> {
     let session = state
         .db
@@ -1193,6 +1195,10 @@ async fn render_session(
         .ok_or_else(|| "Session not found".to_string())?;
     let dir = PathBuf::from(&session.local_path);
     let mode = mode.unwrap_or_else(|| "video".into());
+    let opts = export::RenderVideoOpts {
+        resolution: resolution.unwrap_or_else(|| session.resolution.clone()),
+        fps: fps.unwrap_or(session.frame_rate.max(1)),
+    };
     let out_dir = dir.join("exports").join(format!(
         "render-{}-{}",
         mode,
@@ -1207,7 +1213,7 @@ async fn render_session(
         let master = if mode == "audio" {
             export::render_final_audio(&dir, &out_dir, &mut cb)?
         } else {
-            export::render_final_video(&dir, &layout, &out_dir, &mut cb)?
+            export::render_final_video(&dir, &layout, &out_dir, &opts, &mut cb)?
         };
         Ok(master.to_string_lossy().to_string())
     })

@@ -2067,7 +2067,26 @@ a {
 }
 
 .render-podcast-modal {
-  width: min(440px, 92vw);
+  width: min(480px, 92vw);
+}
+
+.render-podcast-quality {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0 0 8px;
+}
+
+.render-podcast-quality .op-field-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.render-podcast-quality .segmented {
+  flex-wrap: wrap;
 }
 
 .render-podcast-copy {
@@ -2404,7 +2423,9 @@ a {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  background: var(--page);
+  /* Match ffmpeg studio stage (`--page` dark) so preview ≈ export. */
+  background: #0b0b0d;
+  color: #eef3ff;
 }
 
 .playback-layout-pills {
@@ -2415,15 +2436,15 @@ a {
   padding: 3px;
   flex-shrink: 0;
   border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--bg-elevated);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(22, 22, 24, 0.92);
 }
 
 .playback-layout-pill {
   appearance: none;
   border: 0;
   background: transparent;
-  color: var(--text-muted);
+  color: #8f8f98;
   font: inherit;
   font-size: 0.78rem;
   font-weight: 600;
@@ -2437,18 +2458,40 @@ a {
 }
 
 .playback-layout-pill:hover {
-  color: var(--text);
+  color: #f4f4f5;
 }
 
 .playback-layout-pill.is-active {
-  background: color-mix(in srgb, var(--text) 10%, var(--bg-elevated));
-  color: var(--text);
-  box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 8%, transparent);
+  background: rgba(255, 255, 255, 0.1);
+  color: #f4f4f5;
+  box-shadow: none;
 }
 
 .playback-stage .editor-canvas {
   flex: 1;
   min-height: 0;
+  background: #0b0b0d;
+}
+
+.playback-stage .tile {
+  background: #222226;
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  border-radius: 18px;
+}
+
+.playback-stage .tile .name-tag {
+  background: rgba(12, 12, 14, 0.72);
+  color: #f4f4f5;
+  border-color: rgba(255, 255, 255, 0.14);
+  font-family: var(--font);
+  font-weight: 600;
+}
+
+.playback-stage .tile .empty,
+.playback-stage .playback-canvas .tile .empty {
+  color: #8f8f98;
+  background: linear-gradient(160deg, #222226, #161618);
 }
 
 .playback-canvas .tile audio {
