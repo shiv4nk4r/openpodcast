@@ -3450,10 +3450,11 @@ a {
 }
 
 .rs-prompter-stepper span {
-  min-width: 28px;
+  min-width: 40px;
   text-align: center;
   font-size: 0.75rem;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   color: var(--ink-soft);
 }
 

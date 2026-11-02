@@ -102,7 +102,7 @@ export default function Recording() {
   const [prompterOpen, setPrompterOpen] = useState(false);
   const [prompterEditing, setPrompterEditing] = useState(true);
   const [prompterPlaying, setPrompterPlaying] = useState(false);
-  const [prompterSpeed, setPrompterSpeed] = useState(2);
+  const [prompterSpeed, setPrompterSpeed] = useState(1);
   const [prompterSize, setPrompterSize] = useState(2);
   const [prompterScript, setPrompterScript] = useState(() => {
     try {
@@ -865,21 +865,29 @@ export default function Recording() {
                   {prompterPlaying ? "Pause" : "Scroll"}
                 </button>
 
-                <div className="rs-prompter-stepper" title="Scroll speed">
+                <div className="rs-prompter-stepper" title="Scroll speed (0.25× steps)">
                   <button
                     type="button"
                     aria-label="Slower"
-                    disabled={prompterSpeed <= 1}
-                    onClick={() => setPrompterSpeed((s) => Math.max(1, s - 1))}
+                    disabled={prompterSpeed <= 0.5}
+                    onClick={() =>
+                      setPrompterSpeed((s) =>
+                        Math.round(Math.max(0.5, s - 0.25) * 100) / 100,
+                      )
+                    }
                   >
                     <IconMinus size={14} stroke={2} />
                   </button>
-                  <span>{prompterSpeed}x</span>
+                  <span>{Number(prompterSpeed.toFixed(2))}x</span>
                   <button
                     type="button"
                     aria-label="Faster"
                     disabled={prompterSpeed >= 5}
-                    onClick={() => setPrompterSpeed((s) => Math.min(5, s + 1))}
+                    onClick={() =>
+                      setPrompterSpeed((s) =>
+                        Math.round(Math.min(5, s + 0.25) * 100) / 100,
+                      )
+                    }
                   >
                     <IconPlus size={14} stroke={2} />
                   </button>
