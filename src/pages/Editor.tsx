@@ -23,6 +23,7 @@ import {
 } from "@tabler/icons-react";
 import { api } from "../api";
 import { useApp } from "../state";
+import { useTheme } from "../theme";
 import type { CaptionCue, SessionRecord } from "../types";
 
 const TOOL_ICONS = {
@@ -58,6 +59,7 @@ export default function Editor() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { settings, refreshSessions } = useApp();
+  const { theme } = useTheme();
   const [session, setSession] = useState<SessionRecord | null>(null);
   const [files, setFiles] = useState<string[]>([]);
   const [tracks, setTracks] = useState<MediaTrack[]>([]);
@@ -242,13 +244,19 @@ export default function Editor() {
     if (!c) return;
     const ctx = c.getContext("2d");
     if (!ctx) return;
+    const styles = getComputedStyle(document.documentElement);
+    const bg = styles.getPropertyValue("--surface-2").trim() || "#f7f8fb";
+    const waveA = styles.getPropertyValue("--green").trim() || "#16a34a";
+    const waveB = styles.getPropertyValue("--violet").trim() || "#6366f1";
+    const dim =
+      theme === "light" ? "rgba(16,20,28,0.12)" : "rgba(0,0,0,0.45)";
     const w = c.width;
     const h = c.height;
-    ctx.fillStyle = "#111";
+    ctx.fillStyle = bg;
     ctx.fillRect(0, 0, w, h);
     const speakers = Math.max(tracks.length, 1);
     for (let s = 0; s < speakers; s++) {
-      ctx.strokeStyle = s % 2 === 0 ? "#3ddc84" : "#a78bfa";
+      ctx.strokeStyle = s % 2 === 0 ? waveA : waveB;
       ctx.beginPath();
       const yBase = h / 2 + (s - (speakers - 1) / 2) * 12;
       for (let x = 0; x < w; x++) {
@@ -261,10 +269,10 @@ export default function Editor() {
       ctx.stroke();
     }
     if (trimStart > 0) {
-      ctx.fillStyle = "rgba(0,0,0,0.45)";
+      ctx.fillStyle = dim;
       ctx.fillRect(0, 0, (trimStart / duration) * w, h);
     }
-  }, [tracks, trimStart, duration, cues]);
+  }, [tracks, trimStart, duration, cues, theme]);
 
   const tools = useMemo(
     () =>

@@ -20,10 +20,15 @@
           var t = localStorage.getItem("openpodcast.theme");
           document.documentElement.setAttribute(
             "data-theme",
-            t === "light" ? "light" : "dark",
+            t === "dark" ||
+              t === "signal-dark" ||
+              t === "night-booth" ||
+              t === "graphite"
+              ? "dark"
+              : "light",
           );
         } catch (_) {
-          document.documentElement.setAttribute("data-theme", "dark");
+          document.documentElement.setAttribute("data-theme", "light");
         }
       })();
     </script>

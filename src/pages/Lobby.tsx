@@ -26,7 +26,7 @@ import type { StudioMode } from "../types";
 type Panel = "host" | "invite";
 
 export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
-  const { studio, settings, setStudio, refreshSettings } = useApp();
+  const { studio, settings, setStudio, persistSettings } = useApp();
   const navigate = useNavigate();
   const [panel, setPanel] = useState<Panel>(initialPanel ?? "host");
   const [booting, setBooting] = useState(!studio);
@@ -165,15 +165,16 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
     mic?: string;
     camera?: string;
     speaker?: string;
+    displayName?: string;
   }) {
-    await api.saveSettings({
-      ...settings,
-      display_name: name.trim() || (panel === "invite" ? "Guest" : "Host"),
+    await persistSettings({
+      display_name:
+        (next?.displayName ?? name).trim() ||
+        (panel === "invite" ? "Guest" : "Host"),
       preferred_mic_id: next?.mic ?? (audioId || null),
       preferred_camera_id: next?.camera ?? (videoId || null),
       preferred_speaker_id: next?.speaker ?? (speakerId || null),
     });
-    await refreshSettings();
   }
 
   async function joinAsHost() {
@@ -302,6 +303,9 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
                   className="rs-name-input"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
+                  onBlur={() => {
+                    void persistDevices({ displayName: name });
+                  }}
                   placeholder="Your name"
                 />
                 <span className="rs-role-pill">Host</span>
@@ -351,6 +355,9 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
                   className="rs-name-input"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
+                  onBlur={() => {
+                    void persistDevices({ displayName: name });
+                  }}
                   placeholder="Your name"
                 />
                 <span className="rs-role-pill">Guest</span>

@@ -8,7 +8,6 @@ import {
   IconCircleFilled,
   IconMicrophone,
 } from "@tabler/icons-react";
-import { api } from "../api";
 import { Select } from "../components/Select";
 import { pickPreferred, useDeviceList } from "../hooks/useDeviceList";
 import { useApp } from "../state";
@@ -34,7 +33,7 @@ const STEPS: Step[] = ["welcome", "name", "theme", "devices", "ready"];
 
 export default function Onboarding() {
   const navigate = useNavigate();
-  const { settings, refreshSettings } = useApp();
+  const { settings, persistSettings } = useApp();
   const { theme, setTheme, themes } = useTheme();
   const devices = useDeviceList();
 
@@ -175,7 +174,7 @@ export default function Onboarding() {
       case "name":
         return "This shows in the lobby, on tracks, and in captions.";
       case "theme":
-        return "Dark is Signal Dark by default. You can switch anytime in Settings.";
+        return "Light is the default. You can switch to Dark anytime in Settings.";
       case "devices":
         return "We’ll remember these as your defaults. Speak to test the meter.";
       case "ready":
@@ -196,13 +195,11 @@ export default function Onboarding() {
   async function finish() {
     setSaving(true);
     try {
-      await api.saveSettings({
-        ...settings,
+      await persistSettings({
         display_name: name.trim() || "Host",
         preferred_camera_id: cameraId || null,
         preferred_mic_id: micId || null,
       });
-      await refreshSettings();
       markOnboardingComplete();
       // Land on Riverside-style lobby (cam/mic check)
       navigate("/", { replace: true });

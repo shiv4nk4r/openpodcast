@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { open as openDirectory } from "@tauri-apps/plugin-dialog";
 import { open } from "@tauri-apps/plugin-shell";
 import {
   IconArrowLeft,
@@ -9,6 +10,7 @@ import {
   IconRefresh,
   IconVideo,
   IconVolume,
+  IconX,
 } from "@tabler/icons-react";
 import { api } from "../api";
 import { Select } from "../components/Select";
@@ -19,11 +21,13 @@ import { resetOnboarding } from "./Onboarding";
 
 export default function Settings() {
   const navigate = useNavigate();
-  const { settings, refreshSettings } = useApp();
+  const { settings, refreshSettings, persistSettings } = useApp();
   const { theme, setTheme, themes } = useTheme();
   const devices = useDeviceList();
   const previewRef = useRef<HTMLVideoElement | null>(null);
   const previewStream = useRef<MediaStream | null>(null);
+  const skipAutosave = useRef(true);
+  const autosaveTimer = useRef<number>(0);
 
   const [displayName, setDisplayName] = useState(settings.display_name);
   const [folder, setFolder] = useState(settings.recording_folder ?? "");
@@ -53,6 +57,7 @@ export default function Settings() {
   // const [whisperReady, setWhisperReady] = useState(false);
 
   useEffect(() => {
+    skipAutosave.current = true;
     setDisplayName(settings.display_name);
     setFolder(settings.recording_folder ?? "");
     setEcho(settings.echo_cancellation);
@@ -167,32 +172,77 @@ export default function Settings() {
     };
   }, [cameraId, micId, echo]);
 
-  async function save() {
+  function buildSettingsPatch() {
+    const activeCam =
+      (favoriteCams.includes(cameraId) ? cameraId : favoriteCams[0]) ||
+      cameraId ||
+      null;
+    const activeMic =
+      (favoriteMics.includes(micId) ? micId : favoriteMics[0]) || micId || null;
+    return {
+      display_name: displayName.trim() || "Host",
+      recording_folder: folder || null,
+      echo_cancellation: echo,
+      preferred_camera_id: activeCam,
+      preferred_mic_id: activeMic,
+      preferred_speaker_id: speakerId || null,
+      theme,
+    };
+  }
+
+  async function save(quiet = false) {
     setSaving(true);
-    setMsg(null);
+    if (!quiet) setMsg(null);
     try {
-      const activeCam =
-        (favoriteCams.includes(cameraId) ? cameraId : favoriteCams[0]) ||
-        cameraId ||
-        null;
-      const activeMic =
-        (favoriteMics.includes(micId) ? micId : favoriteMics[0]) || micId || null;
-      await api.saveSettings({
-        ...settings,
-        display_name: displayName,
-        recording_folder: folder || null,
-        echo_cancellation: echo,
-        preferred_camera_id: activeCam,
-        preferred_mic_id: activeMic,
-        preferred_speaker_id: speakerId || null,
-      });
+      await persistSettings(buildSettingsPatch());
       // if (aiUrl || aiKey) await api.setAiProvider(aiUrl, aiKey);
-      await refreshSettings();
       setMsg("Saved");
     } catch (e) {
       setMsg(String(e));
     } finally {
       setSaving(false);
+    }
+  }
+
+  // Auto-persist preferences so restarts keep display name, devices, folder, etc.
+  useEffect(() => {
+    if (skipAutosave.current) {
+      skipAutosave.current = false;
+      return;
+    }
+    window.clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = window.setTimeout(() => {
+      void save(true);
+    }, 450);
+    return () => window.clearTimeout(autosaveTimer.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    displayName,
+    folder,
+    echo,
+    cameraId,
+    micId,
+    speakerId,
+    favoriteCams,
+    favoriteMics,
+    theme,
+  ]);
+
+  async function pickRecordingFolder() {
+    try {
+      const selected = await openDirectory({
+        directory: true,
+        multiple: false,
+        title: "Choose recording folder",
+        defaultPath: folder || paths?.sessions || undefined,
+      });
+      if (selected == null) return;
+      const next = Array.isArray(selected) ? selected[0] : selected;
+      if (!next) return;
+      setFolder(next);
+      setMsg("Folder selected — saving…");
+    } catch (e) {
+      setMsg(String(e));
     }
   }
 
@@ -270,7 +320,7 @@ export default function Settings() {
         <section className="rs-settings-card">
           <div className="rs-settings-card-head">
             <h2>Appearance</h2>
-            <p>Dark uses Signal Dark by default. Switch to light anytime.</p>
+            <p>Light is the default. Switch to Signal Dark anytime.</p>
           </div>
           <Select
             label="Theme"
@@ -299,15 +349,37 @@ export default function Settings() {
               />
             </div>
             <div className="field">
-              <label>Recording folder override</label>
-              <div className="rs-settings-input-row">
-                <IconFolder size={16} stroke={1.75} />
-                <input
-                  value={folder}
-                  onChange={(e) => setFolder(e.target.value)}
-                  placeholder="Leave empty to use app data"
-                />
+              <label>Recording folder</label>
+              <div className="rs-settings-folder-row">
+                <button
+                  type="button"
+                  className="rs-settings-input-row rs-settings-folder-pick"
+                  onClick={() => void pickRecordingFolder()}
+                  title="Choose a folder"
+                >
+                  <IconFolder size={16} stroke={1.75} />
+                  <span className={folder ? "" : "is-placeholder"}>
+                    {folder || paths?.sessions || "Choose where recordings are saved"}
+                  </span>
+                </button>
+                {folder ? (
+                  <button
+                    type="button"
+                    className="rs-settings-folder-clear"
+                    aria-label="Use default folder"
+                    title="Use default app folder"
+                    onClick={() => {
+                      setFolder("");
+                      setMsg("Default folder restored — saving…");
+                    }}
+                  >
+                    <IconX size={16} stroke={2} />
+                  </button>
+                ) : null}
               </div>
+              <p className="op-field-hint" style={{ marginTop: 6 }}>
+                Click to open the system folder picker. Empty uses the app data folder.
+              </p>
             </div>
             <button
               type="button"
@@ -570,9 +642,12 @@ export default function Settings() {
             disabled={saving}
             onClick={() => void save()}
           >
-            {saving ? "Saving…" : "Save settings"}
+            {saving ? "Saving…" : "Save now"}
           </button>
           {msg && <p className="rs-settings-msg">{msg}</p>}
+          <p className="op-field-hint">
+            Preferences save automatically and stay after restart.
+          </p>
         </div>
       </div>
     </div>

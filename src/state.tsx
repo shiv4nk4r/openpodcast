@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -16,6 +17,7 @@ interface AppCtx {
   studio: StudioRuntime | null;
   refreshSettings: () => Promise<void>;
   refreshSessions: () => Promise<void>;
+  persistSettings: (patch: Partial<AppSettings>) => Promise<AppSettings>;
   setStudio: (s: StudioRuntime | null) => void;
 }
 
@@ -31,18 +33,34 @@ const defaultSettings: AppSettings = {
   preferred_camera_id: null,
   preferred_mic_id: null,
   preferred_speaker_id: null,
+  theme: "light",
 };
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [studio, setStudio] = useState<StudioRuntime | null>(null);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
 
   const refreshSettings = useCallback(async () => {
     try {
       setSettings(await api.getSettings());
     } catch {
       /* browser preview without Tauri */
+    }
+  }, []);
+
+  const persistSettings = useCallback(async (patch: Partial<AppSettings>) => {
+    const next: AppSettings = { ...settingsRef.current, ...patch };
+    try {
+      const saved = await api.saveSettings(next);
+      setSettings(saved);
+      return saved;
+    } catch (e) {
+      // Fall back to local merge so UI still reflects intent offline
+      setSettings(next);
+      throw e;
     }
   }, []);
 
@@ -66,9 +84,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
       studio,
       refreshSettings,
       refreshSessions,
+      persistSettings,
       setStudio,
     }),
-    [settings, sessions, studio, refreshSettings, refreshSessions],
+    [
+      settings,
+      sessions,
+      studio,
+      refreshSettings,
+      refreshSessions,
+      persistSettings,
+    ],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

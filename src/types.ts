@@ -38,6 +38,8 @@ export interface AppSettings {
   preferred_camera_id: string | null;
   preferred_mic_id: string | null;
   preferred_speaker_id: string | null;
+  /** "dark" | "light" */
+  theme: string;
 }
 
 export interface InviteTicket {

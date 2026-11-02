@@ -64,6 +64,13 @@ pub struct AppSettings {
     pub preferred_mic_id: Option<String>,
     #[serde(default)]
     pub preferred_speaker_id: Option<String>,
+    /// "dark" | "light" — UI appearance preference
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+fn default_theme() -> String {
+    "light".into()
 }
 
 impl Default for AppSettings {
@@ -78,6 +85,7 @@ impl Default for AppSettings {
             preferred_camera_id: None,
             preferred_mic_id: None,
             preferred_speaker_id: None,
+            theme: default_theme(),
         }
     }
 }

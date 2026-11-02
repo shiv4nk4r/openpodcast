@@ -9,7 +9,10 @@ pub fn app_data_dir() -> Result<PathBuf, String> {
 }
 
 pub fn sessions_dir() -> Result<PathBuf, String> {
-    let dir = app_data_dir()?.join("sessions");
+    let dir = match crate::settings::load_settings().recording_folder {
+        Some(ref folder) if !folder.trim().is_empty() => PathBuf::from(folder.trim()),
+        _ => app_data_dir()?.join("sessions"),
+    };
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }

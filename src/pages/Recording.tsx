@@ -62,7 +62,8 @@ const LAYOUT_OPTIONS: {
 ];
 
 export default function Recording() {
-  const { studio, settings, setStudio, refreshSessions } = useApp();
+  const { studio, settings, setStudio, refreshSessions, persistSettings } =
+    useApp();
   const navigate = useNavigate();
   const videoMode = studio?.settings.mode === "audio_video";
   const deviceList = useDeviceList();
@@ -192,8 +193,7 @@ export default function Recording() {
     camera?: string;
     speaker?: string;
   }) {
-    await api.saveSettings({
-      ...settings,
+    await persistSettings({
       preferred_mic_id: next.mic ?? (audioDevice || null),
       preferred_camera_id: next.camera ?? (videoDevice || null),
       preferred_speaker_id: next.speaker ?? (speakerDevice || null),

@@ -1,5 +1,53 @@
-/* OpenPodcast — Signal Dark by default, optional light */
+/* OpenPodcast — Light by default, optional Signal Dark */
 :root,
+[data-theme="light"] {
+  --bg: #f4f6fa;
+  --bg-deep: #e8ecf4;
+  --bg-panel: #ffffff;
+  --bg-elevated: #eef2f8;
+  --bg-soft: #e2e8f2;
+  --bg-bar: rgba(255, 255, 255, 0.94);
+  --page: #f1f4f9;
+  --surface: #ffffff;
+  --surface-2: #f7f8fb;
+  --surface-3: #e9edf5;
+  --surface-4: #dde3ee;
+  --ink: #10141c;
+  --ink-muted: #5b6578;
+  --ink-soft: #3d4658;
+  --hairline: rgba(16, 20, 28, 0.1);
+  --hairline-strong: rgba(16, 20, 28, 0.16);
+  --hover: rgba(16, 20, 28, 0.05);
+  --hover-strong: rgba(16, 20, 28, 0.08);
+  --cta: #10141c;
+  --cta-text: #ffffff;
+  --overlay: rgba(16, 20, 28, 0.35);
+  --chip: rgba(255, 255, 255, 0.86);
+  --chip-text: #10141c;
+  --chip-border: rgba(16, 20, 28, 0.14);
+  --meter-track: rgba(16, 20, 28, 0.14);
+  --grid-line: rgba(16, 20, 28, 0.05);
+  --text: #10141c;
+  --text-muted: #5b6578;
+  --border: rgba(16, 20, 28, 0.1);
+  --border-strong: rgba(16, 20, 28, 0.18);
+  --record: #e11d48;
+  --record-glow: rgba(225, 29, 72, 0.22);
+  --accent: #0284c7;
+  --accent-dim: rgba(2, 132, 199, 0.12);
+  --accent-text: #f0f9ff;
+  --violet: #6366f1;
+  --green: #16a34a;
+  --orange: #d97706;
+  --danger: #dc2626;
+  --radius: 14px;
+  --radius-sm: 10px;
+  --shadow: 0 18px 50px rgba(16, 24, 40, 0.12);
+  --font: "Manrope", system-ui, sans-serif;
+  --font-display: "Sora", "Manrope", system-ui, sans-serif;
+  --grain: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.08'/%3E%3C/svg%3E");
+}
+
 [data-theme="dark"] {
   --bg: #05070c;
   --bg-deep: #02040a;
@@ -22,6 +70,10 @@
   --cta: #f4f4f5;
   --cta-text: #111111;
   --overlay: rgba(0, 0, 0, 0.55);
+  --chip: rgba(12, 12, 14, 0.72);
+  --chip-text: #f4f4f5;
+  --chip-border: rgba(255, 255, 255, 0.14);
+  --meter-track: rgba(255, 255, 255, 0.14);
   --grid-line: rgba(255, 255, 255, 0.025);
   --text: #eef3ff;
   --text-muted: #8a97b0;
@@ -36,51 +88,7 @@
   --green: #4ade80;
   --orange: #fbbf24;
   --danger: #ff5c5c;
-  --radius: 14px;
-  --radius-sm: 10px;
   --shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
-  --font: "Manrope", system-ui, sans-serif;
-  --font-display: "Sora", "Manrope", system-ui, sans-serif;
-  --grain: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.08'/%3E%3C/svg%3E");
-}
-
-[data-theme="light"] {
-  --bg: #f4f6fa;
-  --bg-deep: #e8ecf4;
-  --bg-panel: #ffffff;
-  --bg-elevated: #eef2f8;
-  --bg-soft: #e2e8f2;
-  --bg-bar: rgba(255, 255, 255, 0.94);
-  --page: #f1f4f9;
-  --surface: #ffffff;
-  --surface-2: #f7f8fb;
-  --surface-3: #e9edf5;
-  --surface-4: #dde3ee;
-  --ink: #10141c;
-  --ink-muted: #5b6578;
-  --ink-soft: #3d4658;
-  --hairline: rgba(16, 20, 28, 0.1);
-  --hairline-strong: rgba(16, 20, 28, 0.16);
-  --hover: rgba(16, 20, 28, 0.05);
-  --hover-strong: rgba(16, 20, 28, 0.08);
-  --cta: #10141c;
-  --cta-text: #ffffff;
-  --overlay: rgba(16, 20, 28, 0.45);
-  --grid-line: rgba(16, 20, 28, 0.05);
-  --text: #10141c;
-  --text-muted: #5b6578;
-  --border: rgba(16, 20, 28, 0.1);
-  --border-strong: rgba(16, 20, 28, 0.18);
-  --record: #e11d48;
-  --record-glow: rgba(225, 29, 72, 0.22);
-  --accent: #0284c7;
-  --accent-dim: rgba(2, 132, 199, 0.12);
-  --accent-text: #f0f9ff;
-  --violet: #6366f1;
-  --green: #16a34a;
-  --orange: #d97706;
-  --danger: #dc2626;
-  --shadow: 0 18px 50px rgba(16, 24, 40, 0.12);
 }
 
 * {
@@ -110,16 +118,16 @@ body::before {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  opacity: 0.35;
+  opacity: 0.12;
   background-image: var(--grain);
-  mix-blend-mode: overlay;
+  mix-blend-mode: multiply;
   z-index: 9999;
 }
 
-[data-theme="light"] body::before,
-html[data-theme="light"] body::before {
-  opacity: 0.12;
-  mix-blend-mode: multiply;
+[data-theme="dark"] body::before,
+html[data-theme="dark"] body::before {
+  opacity: 0.35;
+  mix-blend-mode: overlay;
 }
 
 button,
@@ -753,6 +761,62 @@ a {
   padding: 11px 0;
   color: inherit;
   outline: none;
+}
+
+.rs-settings-folder-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.rs-settings-folder-pick {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  cursor: pointer;
+  padding: 0 12px;
+  min-height: 44px;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.rs-settings-folder-pick:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+}
+
+.rs-settings-folder-pick span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 11px 0;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.rs-settings-folder-pick span.is-placeholder {
+  color: var(--ink-muted);
+  font-weight: 500;
+}
+
+.rs-settings-folder-clear {
+  width: 44px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--ink-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rs-settings-folder-clear:hover {
+  color: var(--ink);
+  border-color: var(--border-strong);
 }
 
 .rs-settings-toggle {
@@ -1395,10 +1459,10 @@ a {
 .level-meter {
   height: 8px;
   width: 100%;
-  background: #222;
+  background: var(--surface-3);
   border-radius: 99px;
   overflow: hidden;
-  border: 1px solid var(--border);
+  border: 1px solid var(--hairline);
   position: relative;
 }
 
@@ -1514,13 +1578,13 @@ a {
 
 .tile {
   position: relative;
-  background: #101010;
+  background: var(--surface-3);
   border-radius: 18px;
   overflow: hidden;
   aspect-ratio: 16/9;
   min-height: 200px;
-  border: 1px solid var(--border);
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--hairline);
+  box-shadow: var(--shadow);
 }
 
 .tile video,
@@ -1535,20 +1599,21 @@ a {
   position: absolute;
   left: 12px;
   bottom: 12px;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--chip);
+  color: var(--chip-text);
+  border: 1px solid var(--chip-border);
   padding: 5px 10px;
   border-radius: 8px;
   font-size: 0.85rem;
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(10px);
 }
 
 .tile.empty {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-muted);
-  background:
-    linear-gradient(160deg, #151515, #0a0a0a);
+  color: var(--ink-muted);
+  background: linear-gradient(160deg, var(--surface-3), var(--surface-2));
 }
 
 .people-panel {
@@ -2068,7 +2133,7 @@ a {
   justify-content: center;
   padding: 20px;
   gap: 10px;
-  background: #000;
+  background: var(--page);
   min-height: 0;
 }
 
@@ -2082,7 +2147,7 @@ a {
 .editor-canvas .tile {
   max-width: 48%;
   width: 100%;
-  background: #0a0a0a;
+  background: var(--surface-3);
 }
 
 .editor-canvas.is-grid .tile {
@@ -2094,7 +2159,18 @@ a {
   height: 100%;
   object-fit: cover;
   transform: none;
-  background: #000;
+  background: var(--surface-3);
+}
+
+.playback-canvas .tile .empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-muted);
+  background: linear-gradient(160deg, var(--surface-3), var(--surface-2));
+  font-family: var(--font-display);
+  font-weight: 700;
 }
 
 .tool-panel {
@@ -2131,12 +2207,12 @@ a {
 .wave-track {
   flex: 1;
   height: 72px;
-  background: #111;
+  background: var(--surface-2);
   border-radius: 10px;
   position: relative;
   overflow: hidden;
   cursor: pointer;
-  border: 1px solid var(--border);
+  border: 1px solid var(--hairline);
 }
 
 .wave-canvas {
@@ -2150,8 +2226,9 @@ a {
   top: 0;
   bottom: 0;
   width: 2px;
-  background: white;
+  background: var(--record);
   pointer-events: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--record) 35%, transparent);
 }
 
 .cue-list {
@@ -2587,14 +2664,15 @@ a {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  background: rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(8px);
-  border: 1px solid transparent;
+  background: var(--chip);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--chip-border);
   border-radius: 8px;
   padding: 6px 10px;
   font-size: 0.75rem;
   font-weight: 700;
-  color: #fff;
+  color: var(--chip-text);
   cursor: default;
 }
 
@@ -2604,8 +2682,8 @@ a {
 
 .rs-preview-badge.is-editable:hover,
 .rs-preview-badge[aria-expanded="true"] {
-  background: rgba(0, 0, 0, 0.72);
-  border-color: rgba(255, 255, 255, 0.18);
+  background: color-mix(in srgb, var(--chip) 88%, var(--ink));
+  border-color: var(--hairline-strong);
 }
 
 .rs-preview-badge:disabled {
@@ -2698,14 +2776,14 @@ a {
   height: 3px;
   margin: -4px 10px 10px;
   border-radius: 99px;
-  background: var(--hairline);
+  background: var(--meter-track);
   overflow: hidden;
 }
 
 .rs-inline-meter > span {
   display: block;
   height: 100%;
-  background: linear-gradient(90deg, #34c759, #e8ff6a);
+  background: linear-gradient(90deg, var(--green), var(--orange));
 }
 
 .rs-lobby-nav {
@@ -3056,9 +3134,11 @@ a {
   position: absolute;
   left: 12px;
   bottom: 12px;
-  background: var(--overlay);
-  color: #fff;
-  backdrop-filter: blur(8px);
+  background: var(--chip);
+  color: var(--chip-text);
+  border: 1px solid var(--chip-border);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   border-radius: 8px;
   padding: 6px 10px;
   font-size: 0.85rem;
@@ -3073,17 +3153,23 @@ a {
   flex-direction: column-reverse;
   gap: 2px;
   height: 72px;
+  padding: 6px 5px;
+  border-radius: 8px;
+  background: var(--chip);
+  border: 1px solid var(--chip-border);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
 .rs-vumeter span {
   width: 6px;
   flex: 1;
   border-radius: 2px;
-  background: var(--hairline-strong);
+  background: var(--meter-track);
 }
 
 .rs-vumeter span.is-on {
-  background: #34c759;
+  background: var(--green);
 }
 
 .rs-invite-tile {
@@ -3502,11 +3588,11 @@ a {
 .rs-seg-meter i {
   display: block;
   border-radius: 2px;
-  background: var(--hairline);
+  background: var(--meter-track);
 }
 
 .rs-seg-meter i.is-on {
-  background: #34c759;
+  background: var(--green);
 }
 
 .rs-person-actions {

@@ -11,6 +11,7 @@ import {
 import { api } from "../api";
 import { DeleteRecordingDialog } from "../components/DeleteRecordingDialog";
 import { useApp } from "../state";
+import { useTheme } from "../theme";
 import type { Participant, SessionRecord } from "../types";
 
 interface MediaTrack {
@@ -59,6 +60,7 @@ export default function Playback() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { refreshSessions } = useApp();
+  const { theme } = useTheme();
   const [session, setSession] = useState<SessionRecord | null>(null);
   const [tracks, setTracks] = useState<MediaTrack[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -235,13 +237,19 @@ export default function Playback() {
     if (!c) return;
     const ctx = c.getContext("2d");
     if (!ctx) return;
+    const styles = getComputedStyle(document.documentElement);
+    const bg = styles.getPropertyValue("--surface-2").trim() || "#f7f8fb";
+    const label = styles.getPropertyValue("--ink-soft").trim() || "#3d4658";
+    const muted = styles.getPropertyValue("--ink-muted").trim() || "#5b6578";
+    const waveA = styles.getPropertyValue("--green").trim() || "#16a34a";
+    const waveB = styles.getPropertyValue("--violet").trim() || "#6366f1";
     const dpr = window.devicePixelRatio || 1;
     const cssW = c.clientWidth || 1200;
     const cssH = c.clientHeight || 96;
     c.width = Math.floor(cssW * dpr);
     c.height = Math.floor(cssH * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = "#0e0e10";
+    ctx.fillStyle = bg;
     ctx.fillRect(0, 0, cssW, cssH);
 
     const ids = Object.keys(peaksByTrack);
@@ -251,8 +259,7 @@ export default function Playback() {
     ids.forEach((pid, idx) => {
       const peaks = peaksByTrack[pid];
       const yMid = laneH * idx + laneH / 2;
-      const color = idx % 2 === 0 ? "#3ddc84" : "#8b9cff";
-      ctx.fillStyle = color;
+      ctx.fillStyle = idx % 2 === 0 ? waveA : waveB;
       const n = peaks.length;
       for (let i = 0; i < n; i++) {
         const x = (i / n) * cssW;
@@ -261,18 +268,18 @@ export default function Playback() {
       }
       const tr = tracks.find((t) => t.participant_id === pid);
       if (tr) {
-        ctx.fillStyle = "rgba(255,255,255,0.45)";
-        ctx.font = "11px ui-sans-serif, system-ui";
+        ctx.fillStyle = label;
+        ctx.font = "600 11px Manrope, ui-sans-serif, system-ui";
         ctx.fillText(tr.name, 8, laneH * idx + 14);
       }
     });
 
     if (ids.length === 0) {
-      ctx.fillStyle = "rgba(255,255,255,0.35)";
-      ctx.font = "13px ui-sans-serif, system-ui";
+      ctx.fillStyle = muted;
+      ctx.font = "13px Manrope, ui-sans-serif, system-ui";
       ctx.fillText("Waveform loads when audio is available…", 16, cssH / 2);
     }
-  }, [peaksByTrack, tracks, t, duration]);
+  }, [peaksByTrack, tracks, t, duration, theme]);
 
   function onMediaMeta(el: HTMLMediaElement) {
     if (Number.isFinite(el.duration) && el.duration > 0) {
