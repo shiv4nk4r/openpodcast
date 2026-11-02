@@ -165,7 +165,7 @@ pub fn render_final_video(
     out_dir: &Path,
 ) -> Result<PathBuf, String> {
     let ffmpeg = which_ffmpeg().ok_or_else(|| {
-        "ffmpeg not found. Install ffmpeg (e.g. `brew install ffmpeg`) to render the final podcast."
+        "Bundled ffmpeg was not found. Run `npm run fetch-ffmpeg` (or rebuild the app) so the renderer sidecar is installed."
             .to_string()
     })?;
     std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
@@ -674,26 +674,79 @@ fn avg_wav_rms(path: Option<&Path>) -> f32 {
 }
 
 fn which_ffmpeg() -> Option<PathBuf> {
-    // Prefer PATH, then common install locations.
-    if let Ok(output) = Command::new("which").arg("ffmpeg").output() {
+    // 1) Bundled Tauri sidecar (next to the app binary, or target/debug during `tauri dev`).
+    for p in bundled_ffmpeg_candidates() {
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+
+    // 2) PATH (macOS `which`, Windows `where`).
+    let finder = if cfg!(windows) { "where" } else { "which" };
+    if let Ok(output) = Command::new(finder).arg("ffmpeg").output() {
         if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let path = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
             if !path.is_empty() {
-                return Some(PathBuf::from(path));
+                let p = PathBuf::from(path);
+                if p.is_file() {
+                    return Some(p);
+                }
             }
         }
     }
+
+    // 3) Common install locations.
     for candidate in [
         "/opt/homebrew/bin/ffmpeg",
         "/usr/local/bin/ffmpeg",
         "/usr/bin/ffmpeg",
+        r"C:\ffmpeg\bin\ffmpeg.exe",
+        r"C:\ProgramData\chocolatey\bin\ffmpeg.exe",
     ] {
         let p = PathBuf::from(candidate);
-        if p.exists() {
+        if p.is_file() {
             return Some(p);
         }
     }
     None
+}
+
+fn bundled_ffmpeg_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let triple = option_env!("TARGET_TRIPLE").unwrap_or("unknown-unknown-unknown");
+    let names = [
+        "ffmpeg".to_string(),
+        "ffmpeg.exe".to_string(),
+        format!("ffmpeg-{triple}"),
+        format!("ffmpeg-{triple}.exe"),
+    ];
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for name in &names {
+                out.push(dir.join(name));
+            }
+            // macOS .app: also check Contents/MacOS (same as exe dir) and Resources
+            if cfg!(target_os = "macos") {
+                if let Some(contents) = dir.parent() {
+                    out.push(contents.join("Resources").join("ffmpeg"));
+                    out.push(contents.join(format!("Resources/ffmpeg-{triple}")));
+                }
+            }
+        }
+    }
+
+    // `tauri dev` / cargo: binaries checked into src-tauri/binaries
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries");
+    for name in &names {
+        out.push(manifest.join(name));
+    }
+    out
 }
 
 fn run_ffmpeg(ffmpeg: &Path, args: &[String]) -> Result<(), String> {

@@ -13,6 +13,9 @@ dist-ssr
 dist-bundles
 *.local
 src-tauri/target
+src-tauri/binaries/ffmpeg
+src-tauri/binaries/ffmpeg.exe
+src-tauri/binaries/ffmpeg-*
 .cargo-target
 scripts/sign-env.sh
 # Signing secrets — keep .cer backups; never commit private keys / API keys

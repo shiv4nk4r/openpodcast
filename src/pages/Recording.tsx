@@ -201,6 +201,13 @@ export default function Recording() {
   const [xferFile, setXferFile] = useState<string | null>(null);
   const xferSamplesRef = useRef<TransferSample[]>([]);
   const xferListeningRef = useRef(false);
+  /** Host: per-file receive progress while collecting guest tracks. */
+  const hostRecvFilesRef = useRef<Map<string, { bytes: number; total: number }>>(
+    new Map(),
+  );
+  const hostRecvStartedAt = useRef(0);
+  const [recvElapsed, setRecvElapsed] = useState(0);
+  const [hostRecvActive, setHostRecvActive] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [speakerOpen, setSpeakerOpen] = useState(false);
   const [echo, setEcho] = useState(settings.echo_cancellation);
@@ -229,6 +236,8 @@ export default function Recording() {
   const recordingRef = useRef(false);
   /** Host session id from RecordStart — used when enqueueing guest track return. */
   const hostSessionIdRef = useRef<string | null>(null);
+  /** Prevents the studio-null effect from bouncing to `/` during intentional leave. */
+  const leavingRef = useRef(false);
   const mediaBooted = useRef(false);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
@@ -269,7 +278,10 @@ export default function Recording() {
   });
 
   useEffect(() => {
-    if (!studio) navigate("/", { replace: true });
+    // Only bounce home for unexpected studio loss — leave() navigates itself.
+    if (!studio && !leavingRef.current) {
+      navigate("/", { replace: true });
+    }
   }, [studio, navigate]);
 
   // Seed host / self into the session roster for playback metadata
@@ -611,7 +623,13 @@ export default function Recording() {
     }
   }
 
-  if (!studio) return null;
+  if (!studio) {
+    return (
+      <div className="rs-studio rs-studio-leaving" aria-busy>
+        <p>{leavingRef.current ? "Opening recordings…" : "Leaving studio…"}</p>
+      </div>
+    );
+  }
   const active = studio;
 
   async function copyInvite() {
@@ -874,6 +892,27 @@ export default function Recording() {
   async function waitForGuestVideos(guestIds: string[], timeoutMs: number) {
     if (!guestIds.length) return;
     const pending = new Set(guestIds);
+    hostRecvFilesRef.current = new Map();
+    xferSamplesRef.current = [];
+    hostRecvStartedAt.current = Date.now();
+    setRecvElapsed(0);
+    setHostRecvActive(true);
+    setXferFile(null);
+    setXferStats({
+      bytes: 0,
+      total: 1,
+      pct: 0,
+      bytesPerSec: 0,
+      etaSec: null,
+    });
+
+    const tick = window.setInterval(() => {
+      if (!hostRecvStartedAt.current) return;
+      setRecvElapsed(
+        Math.floor((Date.now() - hostRecvStartedAt.current) / 1000),
+      );
+    }, 250);
+
     const { listen } = await import("@tauri-apps/api/event");
     await new Promise<void>((resolve) => {
       let unlisten: (() => void) | undefined;
@@ -885,16 +924,55 @@ export default function Recording() {
         participant_id: string;
         file_name: string;
         status: string;
+        bytes_received: number;
+        total_bytes: number;
+        overall_bytes?: number;
+        overall_total?: number;
       }>("studio-transfer", (ev) => {
         const p = ev.payload;
+        if (!p?.participant_id || !p.file_name) return;
+
+        const key = `${p.participant_id}:${p.file_name}`;
+        const total = Math.max(
+          1,
+          p.overall_total || p.total_bytes || 1,
+        );
+        const bytes = Math.min(
+          total,
+          p.overall_bytes || p.bytes_received || 0,
+        );
+        hostRecvFilesRef.current.set(key, { bytes, total });
+
+        let sumBytes = 0;
+        let sumTotal = 0;
+        for (const f of hostRecvFilesRef.current.values()) {
+          sumBytes += f.bytes;
+          sumTotal += f.total;
+        }
+        sumTotal = Math.max(1, sumTotal);
+        xferSamplesRef.current = pushSample(
+          xferSamplesRef.current,
+          sumBytes,
+          sumTotal,
+        );
+        const stats = computeTransferStats(xferSamplesRef.current);
+        setXferStats(stats);
+        setXferFile(p.file_name || null);
+        setUploadFrac(0.55 + 0.4 * (stats.pct / 100));
+
+        const guestsDone = guestIds.length - pending.size;
+        setTransferMsg(
+          pending.size
+            ? `Receiving guest videos… ${guestsDone}/${guestIds.length} finished · ${p.file_name}`
+            : "All guest videos received.",
+        );
+
         if (
-          p?.status === "done" &&
+          p.status === "done" &&
           p.file_name.includes("-video.") &&
           pending.has(p.participant_id)
         ) {
           pending.delete(p.participant_id);
-          const done = guestIds.length - pending.size;
-          setUploadFrac(0.55 + (0.35 * done) / Math.max(guestIds.length, 1));
           if (pending.size === 0) {
             window.clearTimeout(timer);
             unlisten?.();
@@ -905,6 +983,19 @@ export default function Recording() {
         unlisten = fn;
       });
     });
+
+    window.clearInterval(tick);
+    setRecvElapsed(
+      Math.floor((Date.now() - hostRecvStartedAt.current) / 1000),
+    );
+    setXferStats((s) => ({
+      ...s,
+      bytes: Math.max(s.bytes, s.total),
+      total: Math.max(s.total, 1),
+      pct: 100,
+      etaSec: 0,
+    }));
+    setHostRecvActive(false);
   }
 
   async function sendTracksToHost() {
@@ -1196,6 +1287,8 @@ export default function Recording() {
   }, [studio]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function leave() {
+    if (leavingRef.current) return;
+    leavingRef.current = true;
     let saved = hasRecording;
     if (recording) {
       await stopRecord();
@@ -1204,16 +1297,15 @@ export default function Recording() {
     await stopScreenShare(false);
     await api.leaveStudio().catch(() => undefined);
     const id = active.sessionId;
-    setStudio(null);
-    if (saved) {
-      await refreshSessions().catch(() => undefined);
-      navigate("/recordings");
-      return;
+    if (!saved) {
+      // Never pressed Record — discard preview session so it never appears in Recordings
+      await api.discardSession(id).catch(() => undefined);
     }
-    // Never pressed Record — discard preview session so it never appears in Recordings
-    await api.discardSession(id).catch(() => undefined);
     await refreshSessions().catch(() => undefined);
-    navigate("/");
+    const dest = saved ? "/recordings" : "/";
+    // Navigate first so the studio-null effect cannot replace us back to `/`.
+    navigate(dest, { replace: true });
+    setStudio(null);
   }
 
   function formatTime(s: number) {
@@ -1838,11 +1930,44 @@ export default function Recording() {
                   }
                 />
               </div>
-            ) : (
-              <div className="level-meter" style={{ margin: "16px 0" }}>
-                <span
-                  style={{ width: `${Math.max(uploadFrac, 0.05) * 100}%` }}
+            ) : active.role === "host" &&
+              (hostRecvActive ||
+                (transferStatus !== "saving" && recvElapsed > 0)) ? (
+              <div style={{ margin: "16px 0" }}>
+                <TransferProgressBar
+                  stats={
+                    transferStatus === "done" && !hostRecvActive
+                      ? { ...xferStats, pct: 100, etaSec: 0 }
+                      : xferStats
+                  }
+                  done={transferStatus === "done" && !hostRecvActive}
+                  label={
+                    xferFile
+                      ? `Receiving ${xferFile}`
+                      : "Waiting for guest uploads…"
+                  }
+                  doneLabel="Guest videos received"
+                  doneMeta="received"
+                  elapsedSec={recvElapsed}
                 />
+              </div>
+            ) : (
+              <div style={{ margin: "16px 0" }}>
+                <div className="rs-xfer-top" style={{ marginBottom: 8 }}>
+                  <span className="rs-xfer-label">
+                    {transferStatus === "saving"
+                      ? "Saving local tracks…"
+                      : "Working…"}
+                  </span>
+                  <span className="rs-xfer-pct">
+                    {Math.round(Math.max(uploadFrac, 0.05) * 100)}%
+                  </span>
+                </div>
+                <div className="level-meter">
+                  <span
+                    style={{ width: `${Math.max(uploadFrac, 0.05) * 100}%` }}
+                  />
+                </div>
               </div>
             )}
             <div className="rs-transfer-actions">

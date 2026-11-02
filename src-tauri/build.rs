@@ -6,6 +6,12 @@ fn main() {
     #[cfg(target_os = "macos")]
     compile_macos_stt_helper();
 
+    // Expose host triple so runtime can locate the ffmpeg sidecar in `tauri dev`.
+    if let Ok(target) = env::var("TARGET") {
+        println!("cargo:rustc-env=TARGET_TRIPLE={target}");
+    }
+    println!("cargo:rerun-if-changed=binaries");
+
     tauri_build::build();
 }
 

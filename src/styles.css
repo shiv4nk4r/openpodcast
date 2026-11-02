@@ -1356,6 +1356,17 @@ a {
   background: color-mix(in srgb, var(--record) 14%, transparent);
 }
 
+.rs-studio-leaving {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--page);
+  color: var(--ink-muted);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
 .rs-error-boundary {
   min-height: 100%;
   display: flex;

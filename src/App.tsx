@@ -19,6 +19,7 @@ function RequireOnboarded({ children }: { children: React.ReactNode }) {
 export default function App() {
   return (
     <div className="app-shell">
+      <ErrorBoundary label="app">
       <Routes>
         <Route path="/onboarding" element={<Onboarding />} />
         <Route
@@ -97,6 +98,7 @@ export default function App() {
         />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      </ErrorBoundary>
     </div>
   );
 }
