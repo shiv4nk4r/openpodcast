@@ -356,30 +356,95 @@ export function useStudioPreview(opts: {
   return { admitted };
 }
 
+function pcmB64Level(b64: string): number {
+  const bytes = b64ToBytes(b64);
+  if (bytes.byteLength < 2) return 0;
+  const samples = new Int16Array(
+    bytes.buffer,
+    bytes.byteOffset,
+    Math.floor(bytes.byteLength / 2),
+  );
+  let sum = 0;
+  const n = samples.length;
+  for (let i = 0; i < n; i++) {
+    const v = samples[i] / 0x8000;
+    sum += v * v;
+  }
+  const rms = Math.sqrt(sum / Math.max(1, n));
+  // Match local meter feel: expand quiet speech, soft-cap peaks.
+  return Math.min(1, Math.pow(rms * 2.8, 0.7));
+}
+
 export function useRemotePeerVideo(
   peerId: string,
   active: boolean,
-): { imgRef: React.RefObject<HTMLImageElement | null>; hasFrame: boolean } {
+): {
+  imgRef: React.RefObject<HTMLImageElement | null>;
+  hasFrame: boolean;
+  /** 0–1 smoothed mic level from preview PCM. */
+  level: number;
+} {
   const imgRef = useRef<HTMLImageElement | null>(null);
   const [hasFrame, setHasFrame] = useState(false);
+  const [level, setLevel] = useState(0);
   const staleTimer = useRef(0);
+  const levelSmooth = useRef(0);
+  const levelRaf = useRef(0);
+  const lastPcmAt = useRef(0);
 
   useEffect(() => {
     if (!active || !peerId) {
       setHasFrame(false);
+      setLevel(0);
+      levelSmooth.current = 0;
       return;
     }
     let unlisten: UnlistenFn | undefined;
+    let decayId = 0;
+
+    const paintLevel = () => {
+      levelRaf.current = 0;
+      setLevel(levelSmooth.current);
+    };
+
+    const scheduleLevel = () => {
+      if (!levelRaf.current) {
+        levelRaf.current = window.requestAnimationFrame(paintLevel);
+      }
+    };
+
+    decayId = window.setInterval(() => {
+      if (Date.now() - lastPcmAt.current > 180) {
+        levelSmooth.current *= 0.82;
+        if (levelSmooth.current < 0.02) levelSmooth.current = 0;
+        scheduleLevel();
+      }
+    }, 50);
+
     void (async () => {
       try {
         unlisten = await listen<PreviewEvent>("studio-preview", (ev) => {
           const p = ev.payload;
-          if (!p?.jpeg_b64 || p.participant_id !== peerId) return;
-          const img = imgRef.current;
-          if (img) img.src = `data:image/jpeg;base64,${p.jpeg_b64}`;
-          setHasFrame(true);
-          window.clearTimeout(staleTimer.current);
-          staleTimer.current = window.setTimeout(() => setHasFrame(false), 4000);
+          if (!p || p.participant_id !== peerId) return;
+
+          if (p.jpeg_b64) {
+            const img = imgRef.current;
+            if (img) img.src = `data:image/jpeg;base64,${p.jpeg_b64}`;
+            setHasFrame(true);
+            window.clearTimeout(staleTimer.current);
+            staleTimer.current = window.setTimeout(() => setHasFrame(false), 4000);
+          }
+
+          if (p.pcm_b64) {
+            lastPcmAt.current = Date.now();
+            const instant = pcmB64Level(p.pcm_b64);
+            // Attack fast, release slower — same idea as local meter.
+            levelSmooth.current =
+              instant > levelSmooth.current
+                ? levelSmooth.current * 0.35 + instant * 0.65
+                : levelSmooth.current * 0.78 + instant * 0.22;
+            scheduleLevel();
+          }
         });
       } catch {
         /* ignore */
@@ -388,8 +453,10 @@ export function useRemotePeerVideo(
     return () => {
       unlisten?.();
       window.clearTimeout(staleTimer.current);
+      window.clearInterval(decayId);
+      if (levelRaf.current) window.cancelAnimationFrame(levelRaf.current);
     };
   }, [peerId, active]);
 
-  return { imgRef, hasFrame };
+  return { imgRef, hasFrame, level };
 }

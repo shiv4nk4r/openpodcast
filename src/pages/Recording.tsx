@@ -41,6 +41,20 @@ import {
 import { useApp } from "../state";
 import type { PeerInfo } from "../types";
 
+function StageVuMeter({ level }: { level: number }) {
+  const levelPct = Math.round(Math.min(1, Math.max(0, level)) * 100);
+  return (
+    <div className="rs-vumeter" aria-hidden>
+      {Array.from({ length: 12 }).map((_, i) => (
+        <span
+          key={i}
+          className={levelPct > (i + 1) * (100 / 12) ? "is-on" : ""}
+        />
+      ))}
+    </div>
+  );
+}
+
 function RemotePeerTile({
   peer,
   waiting,
@@ -56,7 +70,10 @@ function RemotePeerTile({
   admitDisabled?: boolean;
   onAdmit: () => void;
 }) {
-  const { imgRef, hasFrame } = useRemotePeerVideo(peer.id, peer.admitted);
+  const { imgRef, hasFrame, level } = useRemotePeerVideo(
+    peer.id,
+    peer.admitted,
+  );
   return (
     <div
       className={`rs-stage-tile${peer.admitted && hasFrame ? "" : " rs-stage-empty"}${waiting ? " is-waiting" : ""}`}
@@ -68,6 +85,7 @@ function RemotePeerTile({
         hidden={!hasFrame}
       />
       <div className="rs-stage-name">{peer.name}</div>
+      {peer.admitted && <StageVuMeter level={level} />}
       {waiting && (
         <div className="rs-stage-waiting">
           <span>Waiting in lobby</span>
@@ -1110,14 +1128,7 @@ export default function Recording() {
               <div className="rs-stage-name">
                 {sharing ? "Screen share" : active.displayName}
               </div>
-              <div className="rs-vumeter" aria-hidden>
-                {Array.from({ length: 12 }).map((_, i) => (
-                  <span
-                    key={i}
-                    className={levelPct > (i + 1) * (100 / 12) ? "is-on" : ""}
-                  />
-                ))}
-              </div>
+              <StageVuMeter level={media.level} />
             </div>
 
             {showInviteTile && (
