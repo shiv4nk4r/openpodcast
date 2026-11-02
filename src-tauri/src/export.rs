@@ -1,7 +1,7 @@
 use crate::models::{CaptionCue, Participant, PresenceEvent};
 use crate::whisper::cues_to_srt;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -1039,6 +1039,13 @@ fn bundled_ffmpeg_candidates() -> Vec<PathBuf> {
     out
 }
 
+fn started_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
 fn parse_ffmpeg_clock(s: &str) -> Option<f64> {
     // HH:MM:SS.microseconds
     let parts: Vec<&str> = s.trim().split(':').collect();
@@ -1051,30 +1058,110 @@ fn parse_ffmpeg_clock(s: &str) -> Option<f64> {
     Some(h * 3600.0 + m * 60.0 + sec)
 }
 
+struct FfmpegProgressState {
+    out_time_secs: f64,
+    speed: f64,
+    done: bool,
+}
+
+fn parse_ffmpeg_progress_text(text: &str, state: &mut FfmpegProgressState) {
+    // ffmpeg appends key=value blocks; keep the latest values in the file.
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("out_time_ms=") {
+            if let Ok(ms) = v.parse::<f64>() {
+                state.out_time_secs = (ms / 1000.0).max(0.0);
+            }
+        } else if let Some(v) = line.strip_prefix("out_time=") {
+            if let Some(secs) = parse_ffmpeg_clock(v) {
+                state.out_time_secs = secs.max(0.0);
+            }
+        } else if let Some(v) = line.strip_prefix("speed=") {
+            let cleaned = v.trim().trim_end_matches('x');
+            if let Ok(s) = cleaned.parse::<f64>() {
+                if s.is_finite() && s > 0.0 {
+                    state.speed = s;
+                }
+            }
+        } else if line == "progress=end" {
+            state.done = true;
+        }
+    }
+}
+
+fn progress_from_state(
+    state: &FfmpegProgressState,
+    duration_secs: f64,
+    started: Instant,
+) -> RenderProgress {
+    let remaining = (duration_secs - state.out_time_secs).max(0.0);
+    let eta_secs = if state.done {
+        Some(0.0)
+    } else if state.speed > 0.05 {
+        Some(remaining / state.speed)
+    } else {
+        let elapsed = started.elapsed().as_secs_f64();
+        if state.out_time_secs > 0.25 && elapsed > 0.25 {
+            let rate = state.out_time_secs / elapsed;
+            if rate > 0.01 {
+                Some(remaining / rate)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    let pct = if state.done {
+        100.0
+    } else if duration_secs > 0.0 {
+        (state.out_time_secs / duration_secs * 100.0).clamp(0.0, 99.5)
+    } else {
+        0.0
+    };
+    RenderProgress {
+        pct,
+        out_time_secs: state.out_time_secs,
+        duration_secs,
+        eta_secs,
+        phase: if state.done {
+            "done".into()
+        } else {
+            "encoding".into()
+        },
+    }
+}
+
 fn run_ffmpeg(
     ffmpeg: &Path,
     args: &[String],
     duration_secs: f64,
     on_progress: &mut ProgressCallback<'_>,
 ) -> Result<(), String> {
-    let mut full_args: Vec<String> = Vec::with_capacity(args.len() + 3);
+    // pipe:1 is fully buffered when not a TTY, so progress only arrives at exit.
+    // Writing to a file lets us poll live updates while ffmpeg runs.
+    let progress_path = std::env::temp_dir().join(format!(
+        "openpodcast-ffmpeg-progress-{}-{}.txt",
+        std::process::id(),
+        started_nanos()
+    ));
+    let _ = std::fs::remove_file(&progress_path);
+
+    let mut full_args: Vec<String> = Vec::with_capacity(args.len() + 5);
     full_args.push("-nostats".into());
+    full_args.push("-stats_period".into());
+    full_args.push("0.5".into());
     full_args.push("-progress".into());
-    full_args.push("pipe:1".into());
+    full_args.push(progress_path.to_string_lossy().into());
     full_args.extend(args.iter().cloned());
 
     let mut child = Command::new(ffmpeg)
         .args(&full_args)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "ffmpeg stdout unavailable".to_string())?;
     let stderr = child
         .stderr
         .take()
@@ -1099,96 +1186,62 @@ fn run_ffmpeg(
     );
 
     let started = Instant::now();
-    let mut out_time_secs = 0.0_f64;
-    let mut speed = 0.0_f64;
-    let reader = BufReader::new(stdout);
-    for line in reader.lines() {
-        let Ok(line) = line else { continue };
-        if let Some(v) = line.strip_prefix("out_time_ms=") {
-            if let Ok(ms) = v.parse::<f64>() {
-                out_time_secs = (ms / 1000.0).max(0.0);
+    let mut state = FfmpegProgressState {
+        out_time_secs: 0.0,
+        speed: 0.0,
+        done: false,
+    };
+    let mut last_emitted_ms = -1_i64;
+
+    loop {
+        if let Ok(text) = std::fs::read_to_string(&progress_path) {
+            parse_ffmpeg_progress_text(&text, &mut state);
+            let tick_ms = (state.out_time_secs * 10.0).floor() as i64;
+            if tick_ms != last_emitted_ms || state.done {
+                last_emitted_ms = tick_ms;
+                emit_progress(
+                    on_progress,
+                    progress_from_state(&state, duration_secs, started),
+                );
             }
-        } else if let Some(v) = line.strip_prefix("out_time=") {
-            if let Some(secs) = parse_ffmpeg_clock(v) {
-                out_time_secs = secs.max(0.0);
-            }
-        } else if let Some(v) = line.strip_prefix("speed=") {
-            let cleaned = v.trim().trim_end_matches('x');
-            if let Ok(s) = cleaned.parse::<f64>() {
-                if s.is_finite() && s > 0.0 {
-                    speed = s;
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Final read in case the last progress block landed as the process exited.
+                if let Ok(text) = std::fs::read_to_string(&progress_path) {
+                    parse_ffmpeg_progress_text(&text, &mut state);
                 }
-            }
-        } else if let Some(state) = line.strip_prefix("progress=") {
-            let remaining = (duration_secs - out_time_secs).max(0.0);
-            let eta_secs = if speed > 0.05 {
-                Some(remaining / speed)
-            } else {
-                let elapsed = started.elapsed().as_secs_f64();
-                if out_time_secs > 0.5 && elapsed > 0.5 {
-                    let rate = out_time_secs / elapsed;
-                    if rate > 0.01 {
-                        Some(remaining / rate)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
+                let _ = std::fs::remove_file(&progress_path);
+                let stderr_text = stderr_thread
+                    .join()
+                    .unwrap_or_else(|_| String::from("(stderr unavailable)"));
+                if !status.success() {
+                    let tail: String = stderr_text
+                        .chars()
+                        .rev()
+                        .take(1200)
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect();
+                    return Err(format!("ffmpeg failed: {tail}"));
                 }
-            };
-            let done = state == "end";
-            let pct = if done {
-                100.0
-            } else if duration_secs > 0.0 {
-                (out_time_secs / duration_secs * 100.0).clamp(0.0, 99.5)
-            } else {
-                0.0
-            };
-            emit_progress(
-                on_progress,
-                RenderProgress {
-                    pct,
-                    out_time_secs,
-                    duration_secs,
-                    eta_secs: if done { Some(0.0) } else { eta_secs },
-                    phase: if done {
-                        "done".into()
-                    } else {
-                        "encoding".into()
-                    },
-                },
-            );
+                state.done = true;
+                emit_progress(
+                    on_progress,
+                    progress_from_state(&state, duration_secs, started),
+                );
+                return Ok(());
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = std::fs::remove_file(&progress_path);
+                return Err(format!("ffmpeg wait failed: {e}"));
+            }
         }
     }
-
-    let status = child
-        .wait()
-        .map_err(|e| format!("ffmpeg wait failed: {e}"))?;
-    let stderr_text = stderr_thread
-        .join()
-        .unwrap_or_else(|_| String::from("(stderr unavailable)"));
-
-    if !status.success() {
-        let tail: String = stderr_text
-            .chars()
-            .rev()
-            .take(1200)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect();
-        return Err(format!("ffmpeg failed: {tail}"));
-    }
-
-    emit_progress(
-        on_progress,
-        RenderProgress {
-            pct: 100.0,
-            out_time_secs: duration_secs,
-            duration_secs,
-            eta_secs: Some(0.0),
-            phase: "done".into(),
-        },
-    );
-    Ok(())
 }

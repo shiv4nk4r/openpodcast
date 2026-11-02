@@ -2399,6 +2399,58 @@ a {
   height: 110px;
 }
 
+.playback-stage {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--page);
+}
+
+.playback-layout-pills {
+  display: inline-flex;
+  align-self: center;
+  gap: 2px;
+  margin: 12px 16px 0;
+  padding: 3px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.playback-layout-pill {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 6px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition:
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.playback-layout-pill:hover {
+  color: var(--text);
+}
+
+.playback-layout-pill.is-active {
+  background: color-mix(in srgb, var(--text) 10%, var(--bg-elevated));
+  color: var(--text);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.playback-stage .editor-canvas {
+  flex: 1;
+  min-height: 0;
+}
+
 .playback-canvas .tile audio {
   display: none;
 }

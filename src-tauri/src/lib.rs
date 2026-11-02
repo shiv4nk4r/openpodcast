@@ -1180,7 +1180,7 @@ fn get_session_timeline(
 }
 
 #[tauri::command]
-fn render_session(
+async fn render_session(
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     session_id: String,
@@ -1198,16 +1198,21 @@ fn render_session(
         mode,
         chrono::Utc::now().format("%Y%m%d-%H%M%S")
     ));
-    let mut on_progress = |p: export::RenderProgress| {
-        let _ = app.emit("render-progress", &p);
-    };
-    let mut cb: export::ProgressCallback<'_> = Some(&mut on_progress);
-    let master = if mode == "audio" {
-        export::render_final_audio(&dir, &out_dir, &mut cb)?
-    } else {
-        export::render_final_video(&dir, &layout, &out_dir, &mut cb)?
-    };
-    Ok(master.to_string_lossy().to_string())
+    // Run ffmpeg off the async runtime so render-progress events can flush to the UI.
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut on_progress = |p: export::RenderProgress| {
+            let _ = app.emit("render-progress", &p);
+        };
+        let mut cb: export::ProgressCallback<'_> = Some(&mut on_progress);
+        let master = if mode == "audio" {
+            export::render_final_audio(&dir, &out_dir, &mut cb)?
+        } else {
+            export::render_final_video(&dir, &layout, &out_dir, &mut cb)?
+        };
+        Ok(master.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("render task failed: {e}"))?
 }
 
 #[tauri::command]

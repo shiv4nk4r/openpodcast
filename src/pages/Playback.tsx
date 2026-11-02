@@ -89,7 +89,8 @@ export default function Playback() {
   const [renaming, setRenaming] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [renderLayout, setRenderLayout] = useState<RenderLayout>("dynamic");
+  const [previewLayout, setPreviewLayout] = useState<RenderLayout>("dynamic");
+  const [exportLayout, setExportLayout] = useState<RenderLayout>("dynamic");
   const [presenceEvents, setPresenceEvents] = useState<PresenceEvent[]>([]);
   const [offsetsMs, setOffsetsMs] = useState<Record<string, number>>({});
   const [renderOpen, setRenderOpen] = useState(false);
@@ -187,7 +188,7 @@ export default function Playback() {
         )
       : playable;
     if (present.length === 0) return present;
-    if (renderLayout === "dynamic") {
+    if (previewLayout === "dynamic") {
       const speaker =
         (activeSpeakerId &&
           present.find((tr) => tr.participant_id === activeSpeakerId)) ||
@@ -197,7 +198,7 @@ export default function Playback() {
       );
       return [speaker, ...rest];
     }
-    if (renderLayout === "normal") {
+    if (previewLayout === "normal") {
       const host =
         present.find((tr) => /host/i.test(tr.role)) ?? present[0];
       const rest = present.filter(
@@ -211,7 +212,7 @@ export default function Playback() {
     hasPresence,
     presenceIntervals,
     t,
-    renderLayout,
+    previewLayout,
     activeSpeakerId,
   ]);
 
@@ -311,7 +312,7 @@ export default function Playback() {
         }
       }
 
-      if (renderLayout === "dynamic") {
+      if (previewLayout === "dynamic") {
         let bestId: string | null = null;
         let best = 0;
         const ratio = duration > 0 ? timeline / duration : 0;
@@ -351,7 +352,7 @@ export default function Playback() {
   }, [
     playing,
     duration,
-    renderLayout,
+    previewLayout,
     hasPresence,
     presenceIntervals,
     offsetsMs,
@@ -486,6 +487,7 @@ export default function Playback() {
   }
 
   function openRenderDialog() {
+    setExportLayout(previewLayout);
     setRenderMsg(null);
     setRenderOpen(true);
   }
@@ -500,7 +502,7 @@ export default function Playback() {
         : "Rendering video podcast… this can take a minute.",
     );
     try {
-      const path = await api.renderSession(id, renderLayout, mode);
+      const path = await api.renderSession(id, exportLayout, mode);
       setRenderMsg(`Saved: ${path}`);
       try {
         await api.revealSessionFolder(id);
@@ -595,64 +597,94 @@ export default function Playback() {
         ))}
       </div>
 
-      <div
-        className={`editor-canvas playback-canvas is-layout-${renderLayout} is-count-${stageCount}${
-          visibleTracks.length > 1 || renderLayout !== "equal" ? " is-grid" : ""
-        }`}
-      >
-        {loadError && (
-          <div className="tile empty" style={{ maxWidth: "70%" }}>
-            {loadError}
-          </div>
-        )}
-        {!loadError && playable.length === 0 && (
-          <div className="tile empty" style={{ maxWidth: "70%" }}>
-            No playable tracks
-          </div>
-        )}
-        {!loadError && playable.length > 0 && visibleTracks.length === 0 && (
-          <div className="tile empty" style={{ maxWidth: "70%" }}>
-            Nobody on stage at this moment
-          </div>
-        )}
-        {playable.map((tr) => {
-          const stageIdx = visibleTracks.findIndex(
-            (v) => v.participant_id === tr.participant_id,
-          );
-          const onStage = stageIdx >= 0;
-          return (
-            <div
-              className={`tile${onStage && stageIdx === 0 && renderLayout !== "equal" ? " is-speaker" : ""}${onStage ? "" : " is-offstage"}`}
-              key={tr.participant_id}
-              style={onStage ? { order: stageIdx } : undefined}
+      <div className="playback-stage">
+        <div
+          className="playback-layout-pills"
+          role="tablist"
+          aria-label="Preview layout"
+        >
+          {(
+            [
+              { id: "dynamic", label: "Dynamic" },
+              { id: "equal", label: "Equal" },
+              { id: "normal", label: "Normal" },
+            ] as const
+          ).map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              role="tab"
+              aria-selected={previewLayout === opt.id}
+              className={`playback-layout-pill${
+                previewLayout === opt.id ? " is-active" : ""
+              }`}
+              onClick={() => setPreviewLayout(opt.id)}
             >
-              {tr.videoUrl ? (
-                <video
-                  ref={(el) => setVideoRef(tr.participant_id, el)}
-                  src={tr.videoUrl}
-                  playsInline
-                  preload="auto"
-                  muted={!!tr.audioUrl}
-                  onLoadedMetadata={(e) => onMediaMeta(e.currentTarget)}
-                />
-              ) : (
-                <div className="empty">{tr.name}</div>
-              )}
-              {tr.audioUrl && (
-                <audio
-                  ref={(el) => setAudioRef(tr.participant_id, el)}
-                  src={tr.audioUrl}
-                  preload="auto"
-                  onLoadedMetadata={(e) => onMediaMeta(e.currentTarget)}
-                />
-              )}
-              <div className="name-tag">
-                {tr.name}
-                {tr.role ? ` · ${tr.role}` : ""}
-              </div>
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        <div
+          className={`editor-canvas playback-canvas is-layout-${previewLayout} is-count-${stageCount}${
+            visibleTracks.length > 1 || previewLayout !== "equal"
+              ? " is-grid"
+              : ""
+          }`}
+        >
+          {loadError && (
+            <div className="tile empty" style={{ maxWidth: "70%" }}>
+              {loadError}
             </div>
-          );
-        })}
+          )}
+          {!loadError && playable.length === 0 && (
+            <div className="tile empty" style={{ maxWidth: "70%" }}>
+              No playable tracks
+            </div>
+          )}
+          {!loadError && playable.length > 0 && visibleTracks.length === 0 && (
+            <div className="tile empty" style={{ maxWidth: "70%" }}>
+              Nobody on stage at this moment
+            </div>
+          )}
+          {playable.map((tr) => {
+            const stageIdx = visibleTracks.findIndex(
+              (v) => v.participant_id === tr.participant_id,
+            );
+            const onStage = stageIdx >= 0;
+            return (
+              <div
+                className={`tile${onStage && stageIdx === 0 && previewLayout !== "equal" ? " is-speaker" : ""}${onStage ? "" : " is-offstage"}`}
+                key={tr.participant_id}
+                style={onStage ? { order: stageIdx } : undefined}
+              >
+                {tr.videoUrl ? (
+                  <video
+                    ref={(el) => setVideoRef(tr.participant_id, el)}
+                    src={tr.videoUrl}
+                    playsInline
+                    preload="auto"
+                    muted={!!tr.audioUrl}
+                    onLoadedMetadata={(e) => onMediaMeta(e.currentTarget)}
+                  />
+                ) : (
+                  <div className="empty">{tr.name}</div>
+                )}
+                {tr.audioUrl && (
+                  <audio
+                    ref={(el) => setAudioRef(tr.participant_id, el)}
+                    src={tr.audioUrl}
+                    preload="auto"
+                    onLoadedMetadata={(e) => onMediaMeta(e.currentTarget)}
+                  />
+                )}
+                <div className="name-tag">
+                  {tr.name}
+                  {tr.role ? ` · ${tr.role}` : ""}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       <aside className="playback-side">
@@ -769,12 +801,12 @@ export default function Playback() {
     </div>
     <RenderPodcastDialog
       open={renderOpen}
-      layout={renderLayout}
+      layout={exportLayout}
       busy={rendering}
       busyMode={renderBusyMode}
       status={renderMsg}
       hasPresence={hasPresence}
-      onLayoutChange={setRenderLayout}
+      onLayoutChange={setExportLayout}
       onClose={() => {
         if (!rendering) setRenderOpen(false);
       }}
