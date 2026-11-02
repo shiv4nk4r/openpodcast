@@ -106,7 +106,9 @@ export function useLocalMedia(opts: {
                 ...(preferDevice && deviceIds?.audio
                   ? { deviceId: { ideal: deviceIds.audio } }
                   : {}),
-                echoCancellation: opts.echoCancellation ?? true,
+                // Browser AEC fights native AEC3 on the P2P PCM path — keep it off
+                // in studio. `opts.echoCancellation` remains for Settings preview only.
+                echoCancellation: opts.echoCancellation ?? false,
                 // NS ducks speech; AGC lifts quiet mics into a usable range
                 noiseSuppression: false,
                 autoGainControl: true,

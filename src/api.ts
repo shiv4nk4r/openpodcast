@@ -17,6 +17,10 @@ export const api = {
   getSettings: () => invoke<AppSettings>("get_settings"),
   saveSettings: (settings: AppSettings) =>
     invoke<AppSettings>("save_app_settings", { settings }),
+  /** Native WebRTC AEC3 on the P2P PCM path (far-end = played remote audio). */
+  setNativeAec: (enabled: boolean) =>
+    invoke<boolean>("set_native_aec", { enabled }),
+  getNativeAec: () => invoke<boolean>("get_native_aec"),
   setAiProvider: (baseUrl: string, apiKey: string) =>
     invoke<AppSettings>("set_ai_provider", {
       baseUrl,

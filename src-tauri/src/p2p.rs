@@ -223,6 +223,7 @@ impl PeerStream {
         preview_tx: PreviewBus,
         roster_tx: RosterBus,
         record_tx: RecordBus,
+        aec: Arc<crate::aec::AecEngine>,
     ) -> GuestSession {
         let PeerStream {
             _endpoint,
@@ -239,6 +240,9 @@ impl PeerStream {
                         jpeg_b64,
                         pcm_b64,
                     }) => {
+                        if let Some(ref pcm) = pcm_b64 {
+                            aec.feed_render_b64(pcm);
+                        }
                         let _ = preview_tx.send(PreviewEvent {
                             participant_id,
                             jpeg_b64,
@@ -331,6 +335,7 @@ impl StudioHost {
         preview_tx: PreviewBus,
         roster_tx: RosterBus,
         transfer_tx: TransferBus,
+        aec: Arc<crate::aec::AecEngine>,
     ) -> Result<Self, String> {
         let endpoint = Endpoint::builder(presets::N0)
             .alpns(vec![ALPN.to_vec()])
@@ -370,6 +375,7 @@ impl StudioHost {
         let host_name_accept = host_name_c.clone();
         let preview_tx_c = preview_tx.clone();
         let roster_tx_c = roster_tx.clone();
+        let aec_c = aec.clone();
         let ep_accept = endpoint.clone();
         let ep_keepalive = endpoint.clone();
 
@@ -399,6 +405,7 @@ impl StudioHost {
                         let live_host_name = host_name_accept.clone();
                         let preview_tx = preview_tx_c.clone();
                         let roster_tx = roster_tx_c.clone();
+                        let aec = aec_c.clone();
                         tokio::spawn(async move {
                             let accepting = match incoming.accept() {
                                 Ok(a) => a,
@@ -420,6 +427,7 @@ impl StudioHost {
                                         transfer_tx,
                                         preview_tx,
                                         roster_tx,
+                                        aec,
                                     )
                                     .await
                                     {
@@ -664,6 +672,7 @@ async fn handle_guest(
     transfer_tx: TransferBus,
     preview_tx: PreviewBus,
     roster_tx: RosterBus,
+    aec: Arc<crate::aec::AecEngine>,
 ) -> Result<(), String> {
     let (send, mut recv) = conn
         .accept_bi()
@@ -805,6 +814,9 @@ async fn handle_guest(
                     }) => {
                         if transfer_only {
                             continue;
+                        }
+                        if let Some(ref pcm) = pcm_b64 {
+                            aec.feed_render_b64(pcm);
                         }
                         let _ = preview_tx.send(PreviewEvent {
                             participant_id: pid.clone(),

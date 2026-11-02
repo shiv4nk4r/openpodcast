@@ -1,3 +1,4 @@
+mod aec;
 mod capture;
 mod db;
 mod drive;
@@ -141,6 +142,8 @@ pub struct AppState {
     pub record_tx: RecordBus,
     /// Guest → host HQ file transfer progress.
     pub transfer_tx: TransferBus,
+    /// Live-preview AEC3 (render reference = remote PCM, capture = outbound mic).
+    pub aec: Arc<aec::AecEngine>,
 }
 
 impl AppState {
@@ -149,6 +152,9 @@ impl AppState {
         let (roster_tx, _) = tokio::sync::broadcast::channel(32);
         let (record_tx, _) = tokio::sync::broadcast::channel(16);
         let (transfer_tx, _) = tokio::sync::broadcast::channel(64);
+        let aec = aec::AecEngine::new()?;
+        // Match persisted preference so first join already has the right mode.
+        aec.set_enabled(settings::load_settings().echo_cancellation);
         Ok(Self {
             db: Database::open()?,
             host: Mutex::new(None),
@@ -162,6 +168,7 @@ impl AppState {
             roster_tx,
             record_tx,
             transfer_tx,
+            aec,
         })
     }
 }
@@ -311,9 +318,25 @@ fn get_settings() -> AppSettings {
 }
 
 #[tauri::command]
-fn save_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
+fn save_app_settings(
+    state: State<'_, Arc<AppState>>,
+    settings: AppSettings,
+) -> Result<AppSettings, String> {
     settings::save_settings(&settings)?;
+    state.aec.set_enabled(settings.echo_cancellation);
     Ok(settings::load_settings())
+}
+
+/// Enable/disable native AEC3 without rewriting all app settings (lobby headphones).
+#[tauri::command]
+fn set_native_aec(state: State<'_, Arc<AppState>>, enabled: bool) -> Result<bool, String> {
+    state.aec.set_enabled(enabled);
+    Ok(state.aec.enabled())
+}
+
+#[tauri::command]
+fn get_native_aec(state: State<'_, Arc<AppState>>) -> bool {
+    state.aec.enabled()
 }
 
 #[tauri::command]
@@ -447,6 +470,7 @@ async fn create_studio(
         state.preview_tx.clone(),
         state.roster_tx.clone(),
         state.transfer_tx.clone(),
+        state.aec.clone(),
     )
     .await?;
     let ticket = host.encode_ticket()?;
@@ -579,6 +603,7 @@ async fn join_studio(
         state.preview_tx.clone(),
         state.roster_tx.clone(),
         state.record_tx.clone(),
+        state.aec.clone(),
     ));
 
     Ok(serde_json::json!({
@@ -606,6 +631,9 @@ async fn send_preview_frame(
     if jpeg_b64.is_none() && pcm_b64.is_none() {
         return Ok(());
     }
+
+    // Cancel acoustic echo against the far-end PCM we already played as reference.
+    let pcm_b64 = pcm_b64.map(|pcm| state.aec.process_capture_b64(&pcm));
 
     // Clone send handle — never take() the session (concurrent invokes).
     let guest_send = state
@@ -1848,6 +1876,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             save_app_settings,
+            set_native_aec,
+            get_native_aec,
             set_ai_provider,
             get_app_paths,
             list_sessions,

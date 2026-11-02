@@ -56,7 +56,8 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
   const media = useLocalMedia({
     video: videoMode,
     audio: true,
-    echoCancellation: settings.echo_cancellation,
+    // Native AEC3 cleans outbound PCM against the same remote PCM we play.
+    echoCancellation: false,
     skipAutoStart: true,
     resolution,
     frameRate: fps,
@@ -64,6 +65,11 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
 
   const [name, setName] = useState(settings.display_name || "");
   const [headphones, setHeadphones] = useState(true);
+
+  // Headphones → no speaker loop → disable AEC. Speakers → enable AEC3.
+  useEffect(() => {
+    void api.setNativeAec(!headphones).catch(() => undefined);
+  }, [headphones]);
   const [audioId, setAudioId] = useState(settings.preferred_mic_id ?? "");
   const [videoId, setVideoId] = useState(settings.preferred_camera_id ?? "");
   const [speakerId, setSpeakerId] = useState(settings.preferred_speaker_id ?? "");

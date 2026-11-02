@@ -387,8 +387,8 @@ export default function Settings() {
               aria-pressed={echo}
             >
               <span>
-                <strong>Echo cancellation</strong>
-                <small>Default for new studio sessions</small>
+                <strong>Echo cancellation (AEC3)</strong>
+                <small>Native WebRTC AEC on live P2P audio; off if you use headphones</small>
               </span>
               <span className="rs-settings-switch" aria-hidden />
             </button>

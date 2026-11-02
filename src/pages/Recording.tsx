@@ -208,7 +208,8 @@ export default function Recording() {
   const media = useLocalMedia({
     video: !!videoMode,
     audio: true,
-    echoCancellation: settings.echo_cancellation,
+    // Browser AEC off — native AEC3 uses the P2P PCM we play as reference.
+    echoCancellation: false,
     skipAutoStart: true,
     resolution: studio?.settings.resolution,
     frameRate: studio?.settings.frame_rate,
@@ -1879,11 +1880,16 @@ export default function Recording() {
                           emptyLabel="No microphone found"
                         />
                         <label className="toggle">
-                          <span>Echo Cancellation</span>
+                          <span>Echo Cancellation (AEC3)</span>
                           <input
                             type="checkbox"
                             checked={echo}
-                            onChange={(e) => setEcho(e.target.checked)}
+                            onChange={(e) => {
+                              const on = e.target.checked;
+                              setEcho(on);
+                              void api.setNativeAec(on).catch(() => undefined);
+                              void persistSettings({ echo_cancellation: on });
+                            }}
                           />
                         </label>
                       </>
