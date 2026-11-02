@@ -433,7 +433,7 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
                 disabled={busy || !invite.trim()}
                 onClick={() => void joinWithInvite()}
               >
-                {busy ? "Joining…" : "Join Studio"}
+                {busy ? "Connecting (up to 45s)…" : "Join Studio"}
               </button>
 
               <p className="rs-lobby-foot">

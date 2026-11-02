@@ -330,7 +330,9 @@ export default function Recording() {
 
   async function copyInvite() {
     try {
-      const invite = active.invite ?? (await api.getInvite());
+      // Always refresh from the host endpoint so the invite includes a live relay URL.
+      const invite = await api.getInvite();
+      setStudio({ ...active, invite });
       await navigator.clipboard.writeText(invite);
       setInviteCopied(true);
       setTimeout(() => setInviteCopied(false), 2000);

@@ -388,13 +388,17 @@ async fn create_studio(
 }
 
 #[tauri::command]
-fn get_invite(state: State<'_, Arc<AppState>>) -> Result<String, String> {
-    state
-        .host
-        .lock()
-        .as_ref()
-        .ok_or_else(|| "No active studio".to_string())?
-        .encode_ticket()
+async fn get_invite(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let (endpoint, mut ticket) = {
+        let guard = state.host.lock();
+        let host = guard
+            .as_ref()
+            .ok_or_else(|| "No active studio".to_string())?;
+        (host.endpoint().clone(), host.ticket.clone())
+    };
+    p2p::wait_until_dialable(&endpoint).await?;
+    ticket.iroh_ticket = iroh_tickets::endpoint::EndpointTicket::new(endpoint.addr()).to_string();
+    p2p::encode_ticket(&ticket)
 }
 
 #[tauri::command]

@@ -28,8 +28,8 @@ use tokio::sync::mpsc;
 /// Application-Layer Protocol Negotiation for OpenPodcast studio sessions.
 pub const ALPN: &[u8] = b"openpodcast/1";
 
-const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const ONLINE_TIMEOUT: Duration = Duration::from_secs(25);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -112,6 +112,25 @@ pub struct StudioHost {
     shutdown: Arc<Mutex<Option<mpsc::Sender<()>>>>,
 }
 
+/// Wait until the endpoint has a relay URL (required for cross-network dials).
+pub async fn wait_until_dialable(endpoint: &Endpoint) -> Result<(), String> {
+    let _ = tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online()).await;
+    let deadline = tokio::time::Instant::now() + ONLINE_TIMEOUT;
+    loop {
+        let addr = endpoint.addr();
+        if addr.relay_urls().next().is_some() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(
+                "Could not reach an iroh relay. Check that this Mac is online (not captive Wi‑Fi) and try again."
+                    .into(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 impl StudioHost {
     pub async fn start(studio: StudioSettings, host_name: String) -> Result<Self, String> {
         let endpoint = Endpoint::builder(presets::N0)
@@ -120,8 +139,7 @@ impl StudioHost {
             .await
             .map_err(|e| format!("Failed to start studio network: {e}"))?;
 
-        // Wait briefly for a relay registration so cross-network dials work.
-        let _ = tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online()).await;
+        wait_until_dialable(&endpoint).await?;
 
         let password: String = rand::thread_rng()
             .sample_iter(&rand::distributions::Alphanumeric)
@@ -178,6 +196,10 @@ impl StudioHost {
             endpoint,
             shutdown: Arc::new(Mutex::new(Some(tx))),
         })
+    }
+
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
     }
 
     pub fn encode_ticket(&self) -> Result<String, String> {
@@ -312,9 +334,21 @@ pub async fn join_studio(
     }
 
     let addr = parse_iroh_addr(&ticket.iroh_ticket)?;
+    if addr.relay_urls().next().is_none() && addr.ip_addrs().next().is_none() {
+        return Err(
+            "Invite has no network addresses. Ask the host to copy a fresh invite (host must be online)."
+                .into(),
+        );
+    }
+    if addr.relay_urls().next().is_none() {
+        tracing::warn!("invite has no relay URL — cross-network join may fail");
+    }
+
     let endpoint = Endpoint::bind(presets::N0)
         .await
         .map_err(|e| format!("Failed to start guest network: {e}"))?;
+    // Guest also needs relay/STUN before dialing across NATs.
+    wait_until_dialable(&endpoint).await?;
 
     let password = ticket.password.clone();
     let connect = async {
@@ -347,7 +381,7 @@ pub async fn join_studio(
         Ok(Ok(stream)) => Ok(stream),
         Ok(Err(e)) => Err(e),
         Err(_) => Err(
-            "Timed out reaching the host. Both people must be online; try again or check firewalls."
+            "Timed out reaching the host. Ask them to Copy invite again while the studio is open, keep both apps online, and allow OpenPodcast through the firewall."
                 .into(),
         ),
     }
