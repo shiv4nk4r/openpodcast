@@ -123,7 +123,7 @@ pub struct AppState {
     pub db: Database,
     pub host: Mutex<Option<StudioHost>>,
     /// Guest keeps this open so the host can admit them and keep the session alive.
-    pub guest_conn: Mutex<Option<p2p::PeerStream>>,
+    pub guest_conn: Mutex<Option<p2p::GuestSession>>,
     pub recorders: Mutex<HashMap<String, AudioRecorder>>,
     pub active_session: Mutex<Option<String>>,
     /// session_id → Recordings/... folder (created when Record starts)
@@ -469,7 +469,7 @@ async fn join_studio(
 
     // Stay connected so the host sees us in the waiting list and can Admit.
     let stream = p2p::join_studio(&ticket, display_name.clone(), participant_id.clone()).await?;
-    *state.guest_conn.lock() = Some(stream);
+    *state.guest_conn.lock() = Some(stream.hold_open());
 
     Ok(serde_json::json!({
         "session_id": session_id,

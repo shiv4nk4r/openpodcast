@@ -104,6 +104,48 @@ pub struct PeerStream {
     recv: iroh::endpoint::RecvStream,
 }
 
+/// Keeps the guest↔host QUIC session alive after join (Waiting / Admit).
+pub struct GuestSession {
+    _endpoint: Endpoint,
+    _conn: iroh::endpoint::Connection,
+    _send: iroh::endpoint::SendStream,
+    reader: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for GuestSession {
+    fn drop(&mut self) {
+        if let Some(h) = self.reader.take() {
+            h.abort();
+        }
+    }
+}
+
+impl PeerStream {
+    /// Hold the connection open and drain host frames so Admit is not stuck unread.
+    pub fn hold_open(self) -> GuestSession {
+        let PeerStream {
+            _endpoint,
+            _conn,
+            send,
+            mut recv,
+        } = self;
+        let reader = tokio::spawn(async move {
+            loop {
+                match read_frame(&mut recv).await {
+                    Ok(PeerMessage::Leave { .. }) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+        GuestSession {
+            _endpoint,
+            _conn,
+            _send: send,
+            reader: Some(reader),
+        }
+    }
+}
+
 pub struct StudioHost {
     pub password: String,
     pub ticket: InviteTicket,
