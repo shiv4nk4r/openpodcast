@@ -126,13 +126,39 @@ export const api = {
     durationSecs: number,
     participants: { id: string; name: string; role: string; resolution: string }[],
     padOffsetsMs: Record<string, number>,
+    presenceEvents?: {
+      participant_id: string;
+      kind: string;
+      t_ms: number;
+      name?: string;
+    }[],
   ) =>
     invoke<SessionRecord>("finalize_session", {
       sessionId,
       durationSecs,
       participants,
       padOffsetsMs,
+      presenceEvents: presenceEvents ?? null,
     }),
+  getSessionTimeline: (sessionId: string) =>
+    invoke<{
+      duration_secs: number;
+      offsets_ms: Record<string, number>;
+      presence_events: {
+        participant_id: string;
+        kind: string;
+        t_ms: number;
+        name?: string;
+      }[];
+      participants: {
+        id: string;
+        name: string;
+        role: string;
+        resolution: string;
+      }[];
+    }>("get_session_timeline", { sessionId }),
+  renderSession: (sessionId: string, layout: string) =>
+    invoke<string>("render_session", { sessionId, layout }),
   discardSession: (sessionId: string) =>
     invoke<void>("discard_session", { sessionId }),
   /** Permanently delete a saved recording and its local files. */

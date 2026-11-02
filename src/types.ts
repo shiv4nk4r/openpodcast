@@ -14,6 +14,22 @@ export interface Participant {
   resolution: string;
 }
 
+/** Join/leave on the take timeline (ms from Record). */
+export interface PresenceEvent {
+  participant_id: string;
+  kind: "join" | "leave" | string;
+  t_ms: number;
+  name?: string;
+}
+
+export type RenderLayout = "dynamic" | "equal" | "normal";
+
+export interface PresenceInterval {
+  participant_id: string;
+  start_ms: number;
+  end_ms: number | null;
+}
+
 export interface SessionRecord {
   id: string;
   name: string;

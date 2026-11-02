@@ -289,6 +289,8 @@ pub struct StudioHost {
     guest_sends: Arc<Mutex<HashMap<String, GuestSend>>>,
     /// Host session folder that receives guest HQ tracks during/after a take.
     track_inbox: Arc<Mutex<Option<PathBuf>>>,
+    /// Active take: (session_id, wall-clock started_at_ms). Late admits get RecordStart.
+    active_take: Arc<Mutex<Option<(String, i64)>>>,
     _preview_tx: PreviewBus,
     _roster_tx: RosterBus,
 }
@@ -347,6 +349,7 @@ impl StudioHost {
         let peers = Arc::new(Mutex::new(HashMap::new()));
         let guest_sends = Arc::new(Mutex::new(HashMap::new()));
         let track_inbox = Arc::new(Mutex::new(None));
+        let active_take = Arc::new(Mutex::new(None));
         let (tx, mut rx) = mpsc::channel::<()>(1);
         let peers_c = peers.clone();
         let guest_sends_c = guest_sends.clone();
@@ -432,6 +435,7 @@ impl StudioHost {
             live_host_name: host_name_c,
             guest_sends,
             track_inbox,
+            active_take,
             _preview_tx: preview_tx,
             _roster_tx: roster_tx,
         })
@@ -487,6 +491,10 @@ impl StudioHost {
         self.guest_sends.lock().values().cloned().collect()
     }
 
+    pub fn guest_send(&self, participant_id: &str) -> Option<GuestSend> {
+        self.guest_sends.lock().get(participant_id).cloned()
+    }
+
     pub fn admitted_guest_ids(&self) -> Vec<String> {
         self.peers
             .lock()
@@ -500,7 +508,34 @@ impl StudioHost {
         *self.track_inbox.lock() = dir;
     }
 
+    pub fn set_active_take(&self, take: Option<(String, i64)>) {
+        *self.active_take.lock() = take;
+    }
+
+    pub fn active_take(&self) -> Option<(String, i64)> {
+        self.active_take.lock().clone()
+    }
+
+    pub async fn send_record_start_to(
+        &self,
+        participant_id: &str,
+        session_id: String,
+        started_at_ms: i64,
+    ) {
+        let send = self.guest_sends.lock().get(participant_id).cloned();
+        let Some(send) = send else { return };
+        let msg = PeerMessage::RecordStart {
+            session_id,
+            started_at_ms,
+        };
+        let mut guard = send.lock().await;
+        if let Err(e) = write_frame(&mut guard, &msg).await {
+            tracing::warn!("RecordStart to {participant_id} failed: {e}");
+        }
+    }
+
     pub async fn broadcast_record_start(&self, session_id: String, started_at_ms: i64) {
+        self.set_active_take(Some((session_id.clone(), started_at_ms)));
         let targets = self.guest_send_handles();
         let msg = PeerMessage::RecordStart {
             session_id,
@@ -515,6 +550,7 @@ impl StudioHost {
     }
 
     pub async fn broadcast_record_stop(&self) {
+        self.set_active_take(None);
         let targets = self.guest_send_handles();
         let msg = PeerMessage::RecordStop;
         for send in targets {

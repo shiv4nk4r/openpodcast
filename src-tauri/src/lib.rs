@@ -16,7 +16,7 @@ use models::*;
 use parking_lot::Mutex;
 use p2p::{PreviewBus, RecordBus, RosterBus, StudioHost, TransferBus};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::webview::{PermissionKind, PermissionResponse};
 use tauri::{Emitter, Manager, State, WebviewWindowBuilder};
@@ -518,13 +518,30 @@ fn list_peers(state: State<'_, Arc<AppState>>) -> Result<Vec<p2p::PeerInfo>, Str
 }
 
 #[tauri::command]
-fn admit_guest(state: State<'_, Arc<AppState>>, participant_id: String) -> Result<(), String> {
-    state
-        .host
-        .lock()
-        .as_ref()
-        .ok_or_else(|| "No active studio".to_string())?
-        .admit(&participant_id)
+async fn admit_guest(
+    state: State<'_, Arc<AppState>>,
+    participant_id: String,
+) -> Result<(), String> {
+    let (take, send) = {
+        let guard = state.host.lock();
+        let host = guard
+            .as_ref()
+            .ok_or_else(|| "No active studio".to_string())?;
+        host.admit(&participant_id)?;
+        (host.active_take(), host.guest_send(&participant_id))
+    };
+    // Mid-take admit: tell the guest to start HQ capture immediately.
+    if let (Some((session_id, started_at_ms)), Some(send)) = (take, send) {
+        let msg = p2p::PeerMessage::RecordStart {
+            session_id,
+            started_at_ms,
+        };
+        let mut stream = send.lock().await;
+        if let Err(e) = p2p::write_frame(&mut stream, &msg).await {
+            tracing::warn!("late RecordStart failed: {e}");
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -755,9 +772,23 @@ fn finalize_session(
     duration_secs: f64,
     participants: Vec<Participant>,
     pad_offsets_ms: HashMap<String, u64>,
+    presence_events: Option<Vec<PresenceEvent>>,
 ) -> Result<SessionRecord, String> {
     let dir = ensure_recording_dir(&state, &session_id)?;
-    for (pid, pad) in &pad_offsets_ms {
+
+    // Prefer explicit offsets; otherwise derive from first join events.
+    let mut offsets = pad_offsets_ms;
+    if offsets.is_empty() {
+        if let Some(events) = &presence_events {
+            for ev in events {
+                if ev.kind == "join" {
+                    let entry = offsets.entry(ev.participant_id.clone()).or_insert(ev.t_ms);
+                    *entry = (*entry).min(ev.t_ms);
+                }
+            }
+        }
+    }
+    for (pid, pad) in &offsets {
         let wav = dir.join(format!("{pid}-audio.wav"));
         if wav.exists() && *pad > 0 {
             let _ = capture::pad_wav_start(&wav, *pad);
@@ -773,8 +804,11 @@ fn finalize_session(
     };
     sync["session_id"] = serde_json::json!(session_id);
     sync["duration_secs"] = serde_json::json!(duration_secs);
-    sync["offsets_ms"] = serde_json::to_value(&pad_offsets_ms).unwrap_or_default();
+    sync["offsets_ms"] = serde_json::to_value(&offsets).unwrap_or_default();
     sync["participants"] = serde_json::to_value(&participants).unwrap_or_default();
+    if let Some(events) = &presence_events {
+        sync["presence_events"] = serde_json::to_value(events).unwrap_or_default();
+    }
     std::fs::write(&sync_path, serde_json::to_string_pretty(&sync).unwrap())
         .map_err(|e| e.to_string())?;
 
@@ -1134,6 +1168,37 @@ async fn generate_show_notes_cmd(transcript: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_session_timeline(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<export::SessionTimeline, String> {
+    let session = state
+        .db
+        .get_session(&session_id)?
+        .ok_or_else(|| "Session not found".to_string())?;
+    Ok(export::load_timeline(Path::new(&session.local_path)))
+}
+
+#[tauri::command]
+fn render_session(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    layout: String,
+) -> Result<String, String> {
+    let session = state
+        .db
+        .get_session(&session_id)?
+        .ok_or_else(|| "Session not found".to_string())?;
+    let dir = PathBuf::from(&session.local_path);
+    let out_dir = dir.join("exports").join(format!(
+        "render-{}",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+    ));
+    let master = export::render_final_video(&dir, &layout, &out_dir)?;
+    Ok(master.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 fn export_session_cmd(
     state: State<'_, Arc<AppState>>,
     req: export::ExportRequest,
@@ -1299,6 +1364,7 @@ async fn signal_record_start(
             return Err("Not hosting a studio".into());
         };
         host.set_track_inbox(Some(dir));
+        host.set_active_take(Some((session_id.clone(), started_at_ms)));
         host.guest_send_handles()
     };
     p2p::fanout_message(
@@ -1320,6 +1386,7 @@ async fn signal_record_stop(state: State<'_, Arc<AppState>>) -> Result<Vec<Strin
         let Some(host) = host.as_ref() else {
             return Err("Not hosting a studio".into());
         };
+        host.set_active_take(None);
         (host.admitted_guest_ids(), host.guest_send_handles())
     };
     p2p::fanout_message(handles, p2p::PeerMessage::RecordStop).await;
@@ -1540,6 +1607,8 @@ pub fn run() {
             save_captions,
             generate_show_notes_cmd,
             export_session_cmd,
+            get_session_timeline,
+            render_session,
             list_session_files,
             get_session_media,
             save_session_thumbnail,

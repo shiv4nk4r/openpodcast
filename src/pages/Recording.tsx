@@ -40,13 +40,16 @@ import {
   useStudioPreview,
 } from "../hooks/useStudioPreview";
 import {
+  firstJoinOffsetsMs,
+} from "../lib/presence";
+import {
   computeTransferStats,
   pushSample,
   type TransferSample,
   type TransferStats,
 } from "../lib/transferProgress";
 import { useApp } from "../state";
-import type { PeerInfo } from "../types";
+import type { PeerInfo, PresenceEvent } from "../types";
 
 function StageVuMeter({ level }: { level: number }) {
   const levelPct = Math.round(Math.min(1, Math.max(0, level)) * 100);
@@ -228,6 +231,9 @@ export default function Recording() {
   } | null>(null);
   /** Everyone who appeared in the lobby / studio during this session */
   const rosterRef = useRef<Map<string, PeerInfo>>(new Map());
+  /** Join/leave on the take timeline (host only). */
+  const presenceEventsRef = useRef<PresenceEvent[]>([]);
+  const presentIdsRef = useRef<Set<string>>(new Set());
 
   const getVideoEl = useCallback(() => {
     // LiveCameraPreview registers the hidden <video> through media.setVideoEl
@@ -283,6 +289,26 @@ export default function Recording() {
         if (list.some((p) => !p.admitted)) {
           setSideTab("people");
           setPeopleOpen(true);
+        }
+        // Presence: detect mid-take joins/leaves from the live roster.
+        if (recordingRef.current) {
+          const admitted = new Set(
+            list.filter((p) => p.admitted).map((p) => p.id),
+          );
+          for (const id of [...presentIdsRef.current]) {
+            if (id === studio.participantId) continue;
+            if (!admitted.has(id)) {
+              const meta = rosterRef.current.get(id);
+              pushPresence(id, "leave", meta?.name);
+            }
+          }
+          for (const p of list) {
+            if (!p.admitted) continue;
+            if (p.id === studio.participantId) continue;
+            if (!presentIdsRef.current.has(p.id)) {
+              pushPresence(p.id, "join", p.name);
+            }
+          }
         }
       } catch {
         /* ignore */
@@ -370,11 +396,41 @@ export default function Recording() {
   );
   const studioFull = admittedGuestCount >= MAX_GUESTS;
 
+  function pushPresence(
+    participantId: string,
+    kind: "join" | "leave",
+    name?: string,
+  ) {
+    if (!recordingRef.current || !startedAt.current) return;
+    const t_ms = Math.max(0, Date.now() - startedAt.current);
+    const last = presenceEventsRef.current[presenceEventsRef.current.length - 1];
+    if (
+      last &&
+      last.participant_id === participantId &&
+      last.kind === kind &&
+      t_ms - last.t_ms < 250
+    ) {
+      return;
+    }
+    presenceEventsRef.current.push({
+      participant_id: participantId,
+      kind,
+      t_ms,
+      name,
+    });
+    if (kind === "join") presentIdsRef.current.add(participantId);
+    else presentIdsRef.current.delete(participantId);
+  }
+
   async function admitGuest(id: string) {
     try {
       await api.admitGuest(id);
       const list = await api.listPeers();
       setPeers(list);
+      const guest = list.find((p) => p.id === id);
+      if (recordingRef.current && guest?.admitted) {
+        pushPresence(id, "join", guest.name);
+      }
     } catch (e) {
       alert(String(e).replace(/^Error:\s*/i, ""));
     }
@@ -708,12 +764,24 @@ export default function Recording() {
     recordingRef.current = true;
     setRecording(true);
     startedAt.current = Date.now();
+    presenceEventsRef.current = [];
+    presentIdsRef.current = new Set();
     timerRef.current = window.setInterval(() => {
       setElapsed(Math.floor((Date.now() - startedAt.current) / 1000));
     }, 250);
 
-    // Host: open inbox + tell guests to start their own HQ capture.
+    // Host: seed presence for everyone already in the take, then signal guests.
     if (active.role === "host") {
+      pushPresence(
+        active.participantId,
+        "join",
+        (active.displayName || "Host").replace(" (You)", ""),
+      );
+      for (const p of peers) {
+        if (p.admitted && p.id !== active.participantId) {
+          pushPresence(p.id, "join", p.name);
+        }
+      }
       try {
         await api.signalRecordStart(active.sessionId);
       } catch (e) {
@@ -1032,7 +1100,15 @@ export default function Recording() {
       });
     }
     const participants = [...byId.values()];
-    await api.finalizeSession(active.sessionId, duration, participants, {});
+    const presenceEvents = [...presenceEventsRef.current];
+    const padOffsets = firstJoinOffsetsMs(presenceEvents);
+    await api.finalizeSession(
+      active.sessionId,
+      duration,
+      participants,
+      padOffsets,
+      presenceEvents,
+    );
     setHasRecording(true);
     setUploadFrac(1);
     setTransferStatus("done");

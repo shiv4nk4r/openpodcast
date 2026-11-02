@@ -35,6 +35,17 @@ pub struct Participant {
     pub resolution: String,
 }
 
+/// Join/leave relative to the take timeline (0 = Record pressed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresenceEvent {
+    pub participant_id: String,
+    /// "join" | "leave"
+    pub kind: String,
+    pub t_ms: u64,
+    #[serde(default)]
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub id: String,
