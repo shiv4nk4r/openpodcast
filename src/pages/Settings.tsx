@@ -269,25 +269,66 @@ export default function Settings() {
 
   async function connectDrive() {
     try {
+      setMsg("Starting local sign-in helper…");
       const url = await api.beginDriveOauth();
       await open(url);
       setMsg(
-        "Browser opened. After Google consent, paste the ?code= value from the redirect URL below.",
+        "Sign in with Google in the browser. If the page says it can’t connect, that is OK — copy the FULL address from the browser URL bar (starts with http://127.0.0.1:17834/callback?code=…), paste it below, and click Complete connection.",
       );
     } catch (e) {
       setMsg(String(e));
     }
   }
 
-  async function finishDrive() {
+  async function finishDrive(raw?: string) {
+    const value = (raw ?? oauthCode).trim();
+    if (!value) {
+      setMsg("Paste the full redirect URL from the browser, then try again.");
+      return;
+    }
     try {
-      await api.completeDriveOauth(oauthCode.trim());
+      setMsg("Finishing Google Drive connection…");
+      await api.completeDriveOauth(value);
+      setOauthCode("");
       await refreshSettings();
       setMsg("Google Drive connected");
     } catch (e) {
       setMsg(String(e));
     }
   }
+
+  function onOauthPaste(value: string) {
+    setOauthCode(value);
+    if (/callback\?.*code=/.test(value) || /[?&]code=/.test(value)) {
+      void finishDrive(value);
+    }
+  }
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen<{ ok: boolean; error?: string }>(
+          "drive-oauth-done",
+          async (ev) => {
+            if (ev.payload?.ok) {
+              setOauthCode("");
+              await refreshSettings();
+              setMsg("Google Drive connected");
+            } else if (ev.payload?.error) {
+              setMsg(ev.payload.error);
+            }
+          },
+        );
+      } catch {
+        /* browser preview */
+      }
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [refreshSettings]);
 
   const cameraOptions = devices.cameras.map((d) => ({
     value: d.deviceId,
@@ -547,11 +588,11 @@ export default function Settings() {
                 Connect Google Drive
               </button>
               <div className="field">
-                <label>OAuth code (from redirect)</label>
+                <label>Redirect URL or code (fallback)</label>
                 <input
                   value={oauthCode}
-                  onChange={(e) => setOauthCode(e.target.value)}
-                  placeholder="Paste code here"
+                  onChange={(e) => onOauthPaste(e.target.value)}
+                  placeholder="Paste full http://127.0.0.1:17834/callback?code=… URL"
                 />
               </div>
               <button

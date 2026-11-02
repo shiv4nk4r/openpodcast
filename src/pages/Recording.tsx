@@ -44,6 +44,7 @@ import type { PeerInfo } from "../types";
 function RemotePeerTile({
   peer,
   waiting,
+  admitDisabled,
   onAdmit,
 }: {
   peer: {
@@ -52,6 +53,7 @@ function RemotePeerTile({
     admitted: boolean;
   };
   waiting: boolean;
+  admitDisabled?: boolean;
   onAdmit: () => void;
 }) {
   const { imgRef, hasFrame } = useRemotePeerVideo(peer.id, peer.admitted);
@@ -69,8 +71,18 @@ function RemotePeerTile({
       {waiting && (
         <div className="rs-stage-waiting">
           <span>Waiting in lobby</span>
-          <button type="button" className="rs-invite-copy" onClick={onAdmit}>
-            Admit
+          <button
+            type="button"
+            className="rs-invite-copy"
+            disabled={admitDisabled}
+            title={
+              admitDisabled
+                ? `Studio is full (max ${MAX_GUESTS} guests)`
+                : "Admit guest"
+            }
+            onClick={onAdmit}
+          >
+            {admitDisabled ? "Studio full" : "Admit"}
           </button>
         </div>
       )}
@@ -80,6 +92,9 @@ function RemotePeerTile({
 
 type Layout = "auto" | "grid" | "speaker";
 type SideTab = "people" | "layout";
+
+/** 1 host + 3 guests — must match src-tauri MAX_GUESTS. */
+const MAX_GUESTS = 3;
 
 const LAYOUT_OPTIONS: {
   id: Layout;
@@ -132,6 +147,11 @@ export default function Recording() {
   const [elapsed, setElapsed] = useState(0);
   const [uploadFrac, setUploadFrac] = useState(0);
   const [showStayModal, setShowStayModal] = useState(false);
+  const [transferStatus, setTransferStatus] = useState<
+    "idle" | "saving" | "sending" | "done" | "failed"
+  >("idle");
+  const [transferMsg, setTransferMsg] = useState("");
+  const [resumingTransfer, setResumingTransfer] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [speakerOpen, setSpeakerOpen] = useState(false);
   const [echo, setEcho] = useState(settings.echo_cancellation);
@@ -157,6 +177,9 @@ export default function Recording() {
   const [prompterDragging, setPrompterDragging] = useState(false);
   const startedAt = useRef<number>(0);
   const timerRef = useRef<number>(0);
+  const recordingRef = useRef(false);
+  /** Host session id from RecordStart — used when enqueueing guest track return. */
+  const hostSessionIdRef = useRef<string | null>(null);
   const mediaBooted = useRef(false);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
@@ -238,6 +261,32 @@ export default function Recording() {
     };
   }, [studio]);
 
+  // Guests learn the full roster (host + every guest) over the studio wire.
+  useEffect(() => {
+    if (!studio || studio.role !== "guest") return;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen<{ peers: PeerInfo[] }>("studio-roster", (ev) => {
+          const list = ev.payload?.peers ?? [];
+          setPeers(list);
+          for (const p of list) {
+            rosterRef.current.set(p.id, {
+              ...p,
+              role: p.role || (p.id === "host" ? "Host" : "Guest"),
+            });
+          }
+        });
+      } catch {
+        /* browser preview */
+      }
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [studio]);
+
   useEffect(() => {
     const nextMic = pickPreferred(deviceList.mics, settings.preferred_mic_id);
     const nextCam = pickPreferred(deviceList.cameras, settings.preferred_camera_id);
@@ -280,36 +329,69 @@ export default function Recording() {
     [studio, peers],
   );
 
+  const admittedGuestCount = useMemo(
+    () => peers.filter((p) => p.id !== "host" && p.admitted).length,
+    [peers],
+  );
+  const studioFull = admittedGuestCount >= MAX_GUESTS;
+
+  async function admitGuest(id: string) {
+    try {
+      await api.admitGuest(id);
+      const list = await api.listPeers();
+      setPeers(list);
+    } catch (e) {
+      alert(String(e).replace(/^Error:\s*/i, ""));
+    }
+  }
+
   const people = useMemo(() => {
+    const selfId = studio?.participantId ?? "host";
     const self = {
-      id: studio?.participantId ?? "host",
+      id: selfId,
       name: `${studio?.displayName ?? "You"} (You)`,
       role: studio?.role === "host" ? "Host" : "Guest",
       resolution: studio?.settings.resolution ?? "1080p",
       admitted: true,
     };
     if (studio?.role === "guest") {
-      return [
-        self,
-        {
+      // Everyone in the call: host + admitted guests (except self).
+      const remotes = peers
+        .filter((p) => p.id !== selfId && (p.admitted || p.id === "host"))
+        .map((p) => ({
+          id: p.id,
+          name:
+            p.id === "host"
+              ? p.name || studio.hostName || "Host"
+              : p.name,
+          role: p.id === "host" ? "Host" : "Guest",
+          resolution: studio.settings.resolution ?? "1080p",
+          admitted: true,
+        }));
+      // Fallback before first roster arrives.
+      if (!remotes.length) {
+        remotes.push({
           id: "host",
           name: studio.hostName || "Host",
           role: "Host",
           resolution: studio.settings.resolution ?? "1080p",
           admitted: true,
-        },
-      ];
+        });
+      }
+      return [self, ...remotes];
     }
     // Host stage includes waiting guests so Admit is visible without hunting.
     return [
       self,
-      ...peers.map((p) => ({
-        id: p.id,
-        name: p.name,
-        role: p.admitted ? "Guest" : "Waiting",
-        resolution: studio?.settings.resolution ?? "1080p",
-        admitted: p.admitted,
-      })),
+      ...peers
+        .filter((p) => p.id !== "host")
+        .map((p) => ({
+          id: p.id,
+          name: p.name,
+          role: p.admitted ? "Guest" : "Waiting",
+          resolution: studio?.settings.resolution ?? "1080p",
+          admitted: p.admitted,
+        })),
     ];
   }, [studio, peers]);
 
@@ -587,11 +669,23 @@ export default function Recording() {
   }
 
   async function beginRecord() {
+    if (!active || recordingRef.current) return;
+    recordingRef.current = true;
     setRecording(true);
     startedAt.current = Date.now();
     timerRef.current = window.setInterval(() => {
       setElapsed(Math.floor((Date.now() - startedAt.current) / 1000));
     }, 250);
+
+    // Host: open inbox + tell guests to start their own HQ capture.
+    if (active.role === "host") {
+      try {
+        await api.signalRecordStart(active.sessionId);
+      } catch (e) {
+        console.error("signalRecordStart failed", e);
+      }
+    }
+
     try {
       await api.startAudioRecording(
         active.sessionId,
@@ -631,20 +725,169 @@ export default function Recording() {
     }
   }
 
-  async function stopRecord() {
+  async function flushLocalTracks() {
+    try {
+      await api.stopAudioRecording(active!.participantId);
+    } catch {
+      /* ok */
+    }
+    try {
+      const blob = await media.stopRecording();
+      if (blob && blob.size > 0) {
+        const bytes = await blobToBytes(blob);
+        const ext = blob.type.includes("mp4") ? "mp4" : "webm";
+        await api.saveVideoTrack(
+          active!.sessionId,
+          active!.participantId,
+          bytes,
+          ext,
+        );
+      }
+    } catch (e) {
+      console.error("Video finalize failed", e);
+      throw e;
+    }
+  }
+
+  async function waitForGuestVideos(guestIds: string[], timeoutMs: number) {
+    if (!guestIds.length) return;
+    const pending = new Set(guestIds);
+    const { listen } = await import("@tauri-apps/api/event");
+    await new Promise<void>((resolve) => {
+      let unlisten: (() => void) | undefined;
+      const timer = window.setTimeout(() => {
+        unlisten?.();
+        resolve();
+      }, timeoutMs);
+      void listen<{
+        participant_id: string;
+        file_name: string;
+        status: string;
+      }>("studio-transfer", (ev) => {
+        const p = ev.payload;
+        if (
+          p?.status === "done" &&
+          p.file_name.includes("-video.") &&
+          pending.has(p.participant_id)
+        ) {
+          pending.delete(p.participant_id);
+          const done = guestIds.length - pending.size;
+          setUploadFrac(0.55 + (0.35 * done) / Math.max(guestIds.length, 1));
+          if (pending.size === 0) {
+            window.clearTimeout(timer);
+            unlisten?.();
+            resolve();
+          }
+        }
+      }).then((fn) => {
+        unlisten = fn;
+      });
+    });
+  }
+
+  async function sendTracksToHost() {
+    if (!active) return;
+    const hostSid = hostSessionIdRef.current || active.sessionId;
+    const invite = active.invite || "";
+    setTransferStatus("sending");
+    setTransferMsg("Sending your high-quality video to the host…");
+    setResumingTransfer(true);
+    try {
+      await api.enqueueTrackReturn(
+        active.sessionId,
+        hostSid,
+        active.participantId,
+        invite,
+      );
+      await api.returnLocalTracks(
+        active.sessionId,
+        active.participantId,
+        invite,
+        hostSid,
+      );
+      setUploadFrac(1);
+      setTransferStatus("done");
+      setTransferMsg("Host has your full-quality tracks.");
+    } catch (e) {
+      console.error("Guest track return failed", e);
+      setUploadFrac(0.7);
+      setTransferStatus("failed");
+      setTransferMsg(
+        String(e).replace(/^Error:\s*/i, "") ||
+          "Could not reach the host. Your file is safe on this Mac.",
+      );
+    } finally {
+      setResumingTransfer(false);
+    }
+  }
+
+  async function stopGuestRecord() {
+    if (!active || active.role !== "guest") return;
+    recordingRef.current = false;
     setRecording(false);
     clearInterval(timerRef.current);
     const duration = (Date.now() - startedAt.current) / 1000;
     setShowStayModal(true);
-    setUploadFrac(0.1);
-
+    setTransferStatus("saving");
+    setTransferMsg("Saving your full-quality recording on this computer…");
+    setUploadFrac(0.15);
     try {
-      await api.stopAudioRecording(active.participantId);
-    } catch {
-      /* ok */
+      await flushLocalTracks();
+      setUploadFrac(0.35);
+      try {
+        await api.finalizeSession(
+          active.sessionId,
+          duration,
+          [
+            {
+              id: active.participantId,
+              name: (active.displayName || "Guest").replace(" (You)", ""),
+              role: "Guest",
+              resolution: active.settings.resolution,
+            },
+          ],
+          {},
+        );
+      } catch (e) {
+        console.warn("guest finalizeSession", e);
+      }
+      setHasRecording(true);
+      setUploadFrac(0.45);
+      await refreshSessions();
+      await sendTracksToHost();
+    } catch (e) {
+      console.error("Guest stop failed", e);
+      setTransferStatus("failed");
+      setTransferMsg(`Could not finish saving locally: ${String(e)}`);
+      setUploadFrac(0.4);
+    }
+  }
+
+  async function stopRecord() {
+    if (!active) return;
+    if (active.role === "guest") {
+      await stopGuestRecord();
+      return;
     }
 
-    // Capture a still while the camera preview is still live
+    recordingRef.current = false;
+    setRecording(false);
+    clearInterval(timerRef.current);
+    const duration = (Date.now() - startedAt.current) / 1000;
+    setShowStayModal(true);
+    setTransferStatus("saving");
+    setTransferMsg(
+      "Saving host tracks, then collecting guest videos. Keep this studio open until guests finish sending.",
+    );
+    setUploadFrac(0.1);
+
+    let guestIds: string[] = [];
+    try {
+      guestIds = await api.signalRecordStop();
+    } catch (e) {
+      console.error("signalRecordStop failed", e);
+    }
+
     try {
       const thumb = await media.grabJpegFrame();
       if (thumb?.length) {
@@ -654,33 +897,35 @@ export default function Recording() {
       /* optional */
     }
 
-    // Flush remaining MediaRecorder slices to disk (streaming) or fall back to one-shot save
     try {
-      const blob = await media.stopRecording();
-      if (blob && blob.size > 0) {
-        const bytes = await blobToBytes(blob);
-        const ext = blob.type.includes("mp4") ? "mp4" : "webm";
-        await api.saveVideoTrack(
-          active.sessionId,
-          active.participantId,
-          bytes,
-          ext,
-        );
-      }
+      await flushLocalTracks();
     } catch (e) {
-      console.error("Video finalize failed", e);
       alert(
         `Recording could not finish saving video: ${String(e)}\n\nAudio may still be available.`,
       );
     }
 
     setUploadFrac(0.55);
-    // Persist host + everyone who showed up in the lobby/studio
-    const byId = new Map<string, { id: string; name: string; role: string; resolution: string }>();
+    setTransferStatus("sending");
+    setTransferMsg(
+      guestIds.length
+        ? `Waiting for ${guestIds.length} guest upload${guestIds.length === 1 ? "" : "s"} (up to ~90s now; they can resume later while you stay in studio)…`
+        : "No admitted guests — finishing host recording…",
+    );
+    // Don't block for multi-hour uploads — finalize with what we have;
+    // inbox stays open until Leave so late/resumed guest transfers still land.
+    if (guestIds.length) {
+      await waitForGuestVideos(guestIds, 90 * 1000);
+    }
+
+    const byId = new Map<
+      string,
+      { id: string; name: string; role: string; resolution: string }
+    >();
     byId.set(active.participantId, {
       id: active.participantId,
       name: (active.displayName || "Host").replace(" (You)", ""),
-      role: active.role === "host" ? "Host" : "Guest",
+      role: "Host",
       resolution: active.settings.resolution,
     });
     for (const p of rosterRef.current.values()) {
@@ -706,21 +951,45 @@ export default function Recording() {
     const participants = [...byId.values()];
     await api.finalizeSession(active.sessionId, duration, participants, {});
     setHasRecording(true);
-    setUploadFrac(0.75);
-
-    if (settings.drive_connected) {
-      try {
-        await api.uploadSessionToDrive(active.sessionId);
-        setUploadFrac(1);
-      } catch {
-        setUploadFrac(0.9);
-      }
-    } else {
-      setUploadFrac(1);
-    }
-
+    setUploadFrac(1);
+    setTransferStatus("done");
+    setTransferMsg(
+      guestIds.length
+        ? "Episode saved. Keep the studio open if a guest still needs to resume sending."
+        : "Episode saved on this computer.",
+    );
     await refreshSessions();
   }
+
+  // Guests start/stop HQ local recording when the host hits Record.
+  useEffect(() => {
+    if (!studio || studio.role !== "guest") return;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen<{
+          kind?: string;
+          session_id?: string;
+        }>("studio-record", (ev) => {
+          const kind = ev.payload?.kind;
+          if (kind === "start" && !recordingRef.current) {
+            if (ev.payload?.session_id) {
+              hostSessionIdRef.current = ev.payload.session_id;
+            }
+            void beginRecord();
+          } else if (kind === "stop" && recordingRef.current) {
+            void stopGuestRecord();
+          }
+        });
+      } catch {
+        /* browser preview */
+      }
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [studio]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function leave() {
     let saved = hasRecording;
@@ -888,13 +1157,8 @@ export default function Recording() {
                 key={p.id}
                 peer={p}
                 waiting={!p.admitted}
-                onAdmit={() => {
-                  void (async () => {
-                    await api.admitGuest(p.id);
-                    const list = await api.listPeers();
-                    setPeers(list);
-                  })();
-                }}
+                admitDisabled={studioFull}
+                onAdmit={() => void admitGuest(p.id)}
               />
             ))}
           </div>
@@ -1062,15 +1326,15 @@ export default function Recording() {
                         type="button"
                         className="rs-copy-btn"
                         style={{ marginTop: 10 }}
-                        onClick={() => {
-                          void (async () => {
-                            await api.admitGuest(p.id);
-                            const list = await api.listPeers();
-                            setPeers(list);
-                          })();
-                        }}
+                        disabled={studioFull}
+                        title={
+                          studioFull
+                            ? `Studio is full (max ${MAX_GUESTS} guests)`
+                            : "Admit guest"
+                        }
+                        onClick={() => void admitGuest(p.id)}
                       >
-                        Admit
+                        {studioFull ? "Studio full" : "Admit"}
                       </button>
                     )}
                     {p.id === active.participantId && (
@@ -1314,26 +1578,75 @@ export default function Recording() {
 
       {showStayModal && (
         <div className="modal-backdrop">
-          <div className="modal">
-            <h3>Finishing your recording</h3>
+          <div className="modal rs-transfer-modal">
+            <h3>
+              {active.role === "guest"
+                ? transferStatus === "done"
+                  ? "Sent to host"
+                  : transferStatus === "failed"
+                    ? "Saved locally — send still needed"
+                    : "Finishing your recording"
+                : transferStatus === "done"
+                  ? "Recording saved"
+                  : "Finishing the take"}
+            </h3>
             <p style={{ color: "var(--text-muted)" }}>
-              Flushing the last video slices to disk
-              {settings.drive_connected ? " and uploading to Google Drive" : ""}
-              . Most of the take was already saved while you recorded.
+              {transferMsg ||
+                (active.role === "guest"
+                  ? "Your full-quality video stays on this computer until the host has a copy."
+                  : "Guest high-quality videos arrive here when they finish sending.")}
             </p>
             <div className="level-meter" style={{ margin: "16px 0" }}>
-              <span style={{ width: `${uploadFrac * 100}%` }} />
+              <span style={{ width: `${Math.max(uploadFrac, 0.05) * 100}%` }} />
             </div>
-            <button
-              className="btn btn-primary"
-              disabled={uploadFrac < 1}
-              onClick={() => {
-                setShowStayModal(false);
-                void leave();
-              }}
-            >
-              {uploadFrac < 1 ? "Uploading…" : "View recordings"}
-            </button>
+            <div className="rs-transfer-actions">
+              {active.role === "guest" && transferStatus !== "saving" && (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={resumingTransfer || transferStatus === "sending"}
+                  onClick={() => void sendTracksToHost()}
+                >
+                  {resumingTransfer || transferStatus === "sending"
+                    ? "Sending…"
+                    : transferStatus === "failed"
+                      ? "Resume send to host"
+                      : transferStatus === "done"
+                        ? "Send again"
+                        : "Send to host"}
+                </button>
+              )}
+              {hasRecording && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    void api
+                      .revealSessionFolder(active.sessionId)
+                      .catch((e) => alert(String(e)));
+                  }}
+                >
+                  Show files on this computer
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={transferStatus === "saving"}
+                onClick={() => {
+                  setShowStayModal(false);
+                  void leave();
+                }}
+              >
+                {active.role === "guest"
+                  ? transferStatus === "done"
+                    ? "View recordings"
+                    : "Leave — retry later from Recordings"
+                  : transferStatus === "done"
+                    ? "View recordings"
+                    : "Leave studio"}
+              </button>
+            </div>
           </div>
         </div>
       )}

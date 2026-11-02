@@ -1051,6 +1051,81 @@ a {
   max-width: 420px;
 }
 
+.rs-pending-transfers {
+  margin: 0 0 28px;
+  padding: 18px 20px;
+  border-radius: 18px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+}
+
+.rs-pending-transfers h2 {
+  margin: 0 0 6px;
+  font-size: 1.05rem;
+}
+
+.rs-pending-transfers > p {
+  margin: 0 0 14px;
+  color: var(--ink-muted);
+  font-size: 0.9rem;
+  max-width: 520px;
+}
+
+.rs-pending-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rs-pending-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+}
+
+.rs-pending-item strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.rs-pending-item span {
+  display: block;
+  color: var(--ink-muted);
+  font-size: 0.85rem;
+  max-width: 360px;
+}
+
+.rs-pending-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rs-pending-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rs-transfer-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rs-transfer-actions .btn {
+  width: 100%;
+}
+
 .rs-rec-empty {
   margin-top: 48px;
   padding: 48px 24px;
@@ -1165,6 +1240,13 @@ a {
   min-width: 0;
 }
 
+.rs-rec-meta-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
 .rs-rec-delete {
   appearance: none;
   border: 0;
@@ -1183,6 +1265,88 @@ a {
 .rs-rec-delete:hover {
   color: var(--record);
   background: color-mix(in srgb, var(--record) 14%, transparent);
+}
+
+.rs-rec-sync {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-muted);
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  position: relative;
+  flex-shrink: 0;
+  cursor: pointer;
+  padding: 0;
+}
+
+.rs-rec-sync:hover:not(:disabled) {
+  color: var(--ink);
+}
+
+.rs-rec-sync:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.rs-rec-sync.is-busy {
+  color: var(--ink);
+}
+
+.rs-rec-sync.is-done {
+  color: var(--green, #1a7f4b);
+}
+
+.rs-rec-sync-ring {
+  grid-area: 1 / 1;
+  display: block;
+}
+
+.rs-rec-sync-track {
+  stroke: color-mix(in srgb, var(--ink) 14%, transparent);
+}
+
+.rs-rec-sync-value {
+  stroke: currentColor;
+  transition: stroke-dasharray 0.2s ease;
+}
+
+.rs-rec-sync-icon {
+  grid-area: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+
+.rs-rec-sync-badge {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  z-index: 2;
+  min-width: 40px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border: 1px solid var(--hairline);
+  color: var(--ink);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-align: center;
+  backdrop-filter: blur(8px);
+}
+
+.rs-spin {
+  animation: rs-spin 0.8s linear infinite;
+}
+
+@keyframes rs-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .rs-rec-name-btn {

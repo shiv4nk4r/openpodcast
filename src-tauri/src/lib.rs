@@ -7,13 +7,14 @@ mod native_stt;
 mod p2p;
 mod paths;
 mod settings;
+mod transfer_queue;
 mod whisper;
 
 use capture::AudioRecorder;
 use db::Database;
 use models::*;
 use parking_lot::Mutex;
-use p2p::{PreviewBus, StudioHost};
+use p2p::{PreviewBus, RecordBus, RosterBus, StudioHost, TransferBus};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -132,11 +133,20 @@ pub struct AppState {
     pub session_drafts: Mutex<HashMap<String, PathBuf>>,
     /// Live A/V preview frames from the peer session → UI.
     pub preview_tx: PreviewBus,
+    /// Full roster (host + guests) so every client can render everyone.
+    pub roster_tx: RosterBus,
+    /// Host → guest RecordStart / RecordStop.
+    pub record_tx: RecordBus,
+    /// Guest → host HQ file transfer progress.
+    pub transfer_tx: TransferBus,
 }
 
 impl AppState {
     fn new() -> Result<Self, String> {
         let (preview_tx, _) = tokio::sync::broadcast::channel(64);
+        let (roster_tx, _) = tokio::sync::broadcast::channel(32);
+        let (record_tx, _) = tokio::sync::broadcast::channel(16);
+        let (transfer_tx, _) = tokio::sync::broadcast::channel(64);
         Ok(Self {
             db: Database::open()?,
             host: Mutex::new(None),
@@ -146,6 +156,9 @@ impl AppState {
             session_dirs: Mutex::new(HashMap::new()),
             session_drafts: Mutex::new(HashMap::new()),
             preview_tx,
+            roster_tx,
+            record_tx,
+            transfer_tx,
         })
     }
 }
@@ -425,8 +438,14 @@ async fn create_studio(
     });
     let draft = write_draft_sync(&state, &session_id, &sync)?;
 
-    let host =
-        StudioHost::start(settings.clone(), host_name.clone(), state.preview_tx.clone()).await?;
+    let host = StudioHost::start(
+        settings.clone(),
+        host_name.clone(),
+        state.preview_tx.clone(),
+        state.roster_tx.clone(),
+        state.transfer_tx.clone(),
+    )
+    .await?;
     let ticket = host.encode_ticket()?;
     let peers = host.peer_list();
     *state.host.lock() = Some(host);
@@ -505,8 +524,7 @@ fn admit_guest(state: State<'_, Arc<AppState>>, participant_id: String) -> Resul
         .lock()
         .as_ref()
         .ok_or_else(|| "No active studio".to_string())?
-        .admit(&participant_id);
-    Ok(())
+        .admit(&participant_id)
 }
 
 #[tauri::command]
@@ -528,6 +546,7 @@ async fn join_studio(
         "studio": ticket.studio,
         "guest_name": display_name,
         "participant_id": participant_id,
+        "invite": invite,
         "joined_at": chrono::Utc::now().to_rfc3339(),
     });
     let draft = write_draft_sync(&state, &session_id, &sync)?;
@@ -536,7 +555,11 @@ async fn join_studio(
     // Stay connected so the host sees us in the waiting list and can Admit.
     let (stream, host_name) =
         p2p::join_studio(&ticket, display_name.clone(), participant_id.clone()).await?;
-    *state.guest_conn.lock() = Some(stream.hold_open(state.preview_tx.clone()));
+    *state.guest_conn.lock() = Some(stream.hold_open(
+        state.preview_tx.clone(),
+        state.roster_tx.clone(),
+        state.record_tx.clone(),
+    ));
 
     Ok(serde_json::json!({
         "session_id": session_id,
@@ -548,6 +571,7 @@ async fn join_studio(
             host_name
         },
         "connected": true,
+        "invite": invite,
         "draft_path": draft.to_string_lossy(),
     }))
 }
@@ -891,8 +915,8 @@ fn leave_studio(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn begin_drive_oauth() -> Result<String, String> {
-    drive::begin_oauth()
+async fn begin_drive_oauth(app: tauri::AppHandle) -> Result<String, String> {
+    drive::begin_oauth(app).await
 }
 
 #[tauri::command]
@@ -902,6 +926,17 @@ async fn complete_drive_oauth(code: String) -> Result<AppSettings, String> {
     s.drive_connected = true;
     settings::save_settings(&s)?;
     Ok(settings::load_settings())
+}
+
+#[tauri::command]
+fn save_google_client_secret(secret: String) -> Result<bool, String> {
+    drive::set_oauth_client_secret(&secret)?;
+    Ok(drive::has_oauth_client_secret())
+}
+
+#[tauri::command]
+fn google_client_secret_configured() -> bool {
+    drive::has_oauth_client_secret()
 }
 
 #[tauri::command]
@@ -1250,30 +1285,195 @@ fn reveal_session_folder(
     Ok(dir.to_string_lossy().to_string())
 }
 
-/// Guest → host track return over the invite TCP session (resumable chunks).
+/// Host: open the session inbox and tell every guest to start local HQ recording.
 #[tauri::command]
-async fn return_tracks_to_host(
+async fn signal_record_start(
     state: State<'_, Arc<AppState>>,
-    invite: String,
-    participant_id: String,
     session_id: String,
+) -> Result<(), String> {
+    let dir = ensure_recording_dir(&state, &session_id)?;
+    let started_at_ms = chrono::Utc::now().timestamp_millis();
+    let handles = {
+        let host = state.host.lock();
+        let Some(host) = host.as_ref() else {
+            return Err("Not hosting a studio".into());
+        };
+        host.set_track_inbox(Some(dir));
+        host.guest_send_handles()
+    };
+    p2p::fanout_message(
+        handles,
+        p2p::PeerMessage::RecordStart {
+            session_id,
+            started_at_ms,
+        },
+    )
+    .await;
+    Ok(())
+}
+
+/// Host: tell guests to stop and begin sending tracks.
+#[tauri::command]
+async fn signal_record_stop(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, String> {
+    let (admitted, handles) = {
+        let host = state.host.lock();
+        let Some(host) = host.as_ref() else {
+            return Err("Not hosting a studio".into());
+        };
+        (host.admitted_guest_ids(), host.guest_send_handles())
+    };
+    p2p::fanout_message(handles, p2p::PeerMessage::RecordStop).await;
+    Ok(admitted)
+}
+
+fn guest_track_paths(dir: &PathBuf, participant_id: &str) -> Result<Vec<PathBuf>, String> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .collect();
+    entries.sort();
+    Ok(entries
+        .into_iter()
+        .filter(|path| {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            (name.contains("-audio.") || name.contains("-video."))
+                && name.starts_with(&format!("{participant_id}-"))
+        })
+        .collect())
+}
+
+/// Guest: enqueue local HQ tracks for durable delivery (survives leaving the lobby).
+#[tauri::command]
+fn enqueue_track_return(
+    state: State<'_, Arc<AppState>>,
+    local_session_id: String,
+    host_session_id: String,
+    participant_id: String,
+    invite: String,
+) -> Result<transfer_queue::PendingTransfer, String> {
+    let dir = resolve_session_dir(&state, &local_session_id)?;
+    let paths = guest_track_paths(&dir, &participant_id)?;
+    if paths.is_empty() {
+        return Err("No local audio/video tracks found to queue".into());
+    }
+    let file_names = paths
+        .iter()
+        .filter_map(|p| p.file_name()?.to_str().map(|s| s.to_string()))
+        .collect::<Vec<_>>();
+    let item = transfer_queue::PendingTransfer {
+        id: format!("{host_session_id}:{participant_id}"),
+        host_session_id,
+        participant_id,
+        invite,
+        local_session_id,
+        file_names,
+        offsets: Default::default(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        last_error: None,
+    };
+    transfer_queue::enqueue(item.clone())?;
+    Ok(item)
+}
+
+#[tauri::command]
+fn list_pending_transfers() -> Vec<transfer_queue::PendingTransfer> {
+    transfer_queue::list_pending()
+}
+
+/// Guest: push tracks now (live session if connected, else reconnect with purpose=transfer).
+#[tauri::command]
+async fn return_local_tracks(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    participant_id: String,
+    invite: Option<String>,
+    host_session_id: Option<String>,
 ) -> Result<Vec<String>, String> {
-    let ticket = p2p::decode_ticket(&invite)?;
-    let (mut stream, _) =
-        p2p::join_studio(&ticket, participant_id.clone(), participant_id.clone()).await?;
     let dir = resolve_session_dir(&state, &session_id)?;
+    let paths = guest_track_paths(&dir, &participant_id)?;
+    if paths.is_empty() {
+        return Err("No local audio/video tracks found to send".into());
+    }
+
+    let pending_id = host_session_id
+        .as_ref()
+        .map(|h| format!("{h}:{participant_id}"))
+        .unwrap_or_else(|| format!("{session_id}:{participant_id}"));
+    let offsets = transfer_queue::list_pending()
+        .into_iter()
+        .find(|p| p.id == pending_id)
+        .map(|p| p.offsets)
+        .unwrap_or_default();
+
+    // Prefer the live lobby connection; otherwise dial transfer-only.
+    let live = state
+        .guest_conn
+        .lock()
+        .as_ref()
+        .map(|s| s.send_handle());
+
+    let (_keep_endpoint, _keep_conn, _keep_recv, send) = if let Some(send) = live {
+        (None, None, None, send)
+    } else {
+        let invite = invite
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                "Not connected. Keep the host studio open and retry with the invite, or share files from your Recordings folder."
+                    .to_string()
+            })?;
+        let ticket = p2p::decode_ticket(&invite)?;
+        let stream = p2p::join_for_transfer(
+            &ticket,
+            participant_id.clone(),
+            participant_id.clone(),
+        )
+        .await?;
+        let p2p::PeerStream {
+            _endpoint,
+            _conn,
+            send,
+            recv,
+        } = stream;
+        (
+            Some(_endpoint),
+            Some(_conn),
+            Some(recv),
+            Arc::new(tokio::sync::Mutex::new(send)),
+        )
+    };
+
     let mut sent = Vec::new();
-    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        if path.is_file() {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.contains("-audio.") || name.contains("-video.") {
-                p2p::send_file(&mut stream, &participant_id, &path).await?;
-                sent.push(name.to_string());
+    for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("track.bin")
+            .to_string();
+        let resume = offsets.get(&name).copied().unwrap_or(0);
+        match p2p::send_file_on(
+            send.clone(),
+            &participant_id,
+            &path,
+            resume,
+            Some((pending_id.clone(), name.clone())),
+            Some(state.transfer_tx.clone()),
+        )
+        .await
+        {
+            Ok(()) => {
+                sent.push(name);
+            }
+            Err(e) => {
+                let _ = transfer_queue::set_error(&pending_id, e.clone());
+                return Err(e);
             }
         }
     }
+    let _ = transfer_queue::remove(&pending_id);
     Ok(sent)
 }
 
@@ -1314,6 +1514,8 @@ pub fn run() {
             leave_studio,
             begin_drive_oauth,
             complete_drive_oauth,
+            save_google_client_secret,
+            google_client_secret_configured,
             disconnect_drive,
             upload_session_to_drive,
             whisper_model_status,
@@ -1330,7 +1532,11 @@ pub fn run() {
             save_session_thumbnail,
             get_session_thumbnail,
             reveal_session_folder,
-            return_tracks_to_host,
+            signal_record_start,
+            signal_record_stop,
+            enqueue_track_return,
+            list_pending_transfers,
+            return_local_tracks,
             send_preview_frame,
         ])
         .setup(|app| {
@@ -1353,15 +1559,54 @@ pub fn run() {
             grant_webview_media_permissions(&window);
             let _ = window;
 
-            // Forward peer preview frames to the webview.
+            // Forward peer preview frames + roster to the webview.
             let handle = app.handle().clone();
             let state = app.state::<Arc<AppState>>().inner().clone();
             let mut rx = state.preview_tx.subscribe();
+            let handle_preview = handle.clone();
             tauri::async_runtime::spawn(async move {
                 loop {
                     match rx.recv().await {
                         Ok(ev) => {
-                            let _ = handle.emit("studio-preview", &ev);
+                            let _ = handle_preview.emit("studio-preview", &ev);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+            let mut roster_rx = state.roster_tx.subscribe();
+            let handle_roster = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match roster_rx.recv().await {
+                        Ok(ev) => {
+                            let _ = handle_roster.emit("studio-roster", &ev);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+            let mut record_rx = state.record_tx.subscribe();
+            let handle_record = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match record_rx.recv().await {
+                        Ok(ev) => {
+                            let _ = handle_record.emit("studio-record", &ev);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+            let mut transfer_rx = state.transfer_tx.subscribe();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match transfer_rx.recv().await {
+                        Ok(ev) => {
+                            let _ = handle.emit("studio-transfer", &ev);
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

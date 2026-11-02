@@ -142,6 +142,10 @@ export const api = {
   beginDriveOauth: () => invoke<string>("begin_drive_oauth"),
   completeDriveOauth: (code: string) =>
     invoke<AppSettings>("complete_drive_oauth", { code }),
+  saveGoogleClientSecret: (secret: string) =>
+    invoke<boolean>("save_google_client_secret", { secret }),
+  googleClientSecretConfigured: () =>
+    invoke<boolean>("google_client_secret_configured"),
   disconnectDrive: () => invoke<AppSettings>("disconnect_drive"),
   uploadSessionToDrive: (sessionId: string) =>
     invoke<{ uploaded: unknown[] }>("upload_session_to_drive", {
@@ -199,4 +203,47 @@ export const api = {
     invoke<string | null>("get_session_thumbnail", { sessionId }),
   revealSessionFolder: (sessionId: string) =>
     invoke<string>("reveal_session_folder", { sessionId }),
+  /** Host: guests start local HQ recording into the shared take. */
+  signalRecordStart: (sessionId: string) =>
+    invoke<void>("signal_record_start", { sessionId }),
+  /** Host: guests stop and push tracks back. Returns admitted guest ids. */
+  signalRecordStop: () => invoke<string[]>("signal_record_stop"),
+  /** Guest: queue HQ tracks for durable delivery (survives leaving lobby). */
+  enqueueTrackReturn: (
+    localSessionId: string,
+    hostSessionId: string,
+    participantId: string,
+    invite: string,
+  ) =>
+    invoke<{ id: string }>("enqueue_track_return", {
+      localSessionId,
+      hostSessionId,
+      participantId,
+      invite,
+    }),
+  listPendingTransfers: () =>
+    invoke<
+      {
+        id: string;
+        host_session_id: string;
+        participant_id: string;
+        invite: string;
+        local_session_id: string;
+        file_names: string[];
+        last_error: string | null;
+      }[]
+    >("list_pending_transfers"),
+  /** Guest: send local HQ tracks (live or reconnect). Resumes large uploads. */
+  returnLocalTracks: (
+    sessionId: string,
+    participantId: string,
+    invite?: string,
+    hostSessionId?: string,
+  ) =>
+    invoke<string[]>("return_local_tracks", {
+      sessionId,
+      participantId,
+      invite: invite ?? null,
+      hostSessionId: hostSessionId ?? null,
+    }),
 };

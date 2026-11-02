@@ -77,6 +77,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
     refreshSessions();
   }, [refreshSettings, refreshSessions]);
 
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen<{ ok: boolean }>("drive-oauth-done", async (ev) => {
+          if (ev.payload?.ok) {
+            await refreshSettings();
+          }
+        });
+      } catch {
+        /* browser preview */
+      }
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [refreshSettings]);
+
   const value = useMemo(
     () => ({
       settings,

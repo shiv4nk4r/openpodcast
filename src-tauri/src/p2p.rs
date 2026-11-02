@@ -19,6 +19,7 @@ use parking_lot::Mutex;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -27,6 +28,9 @@ use tokio::sync::mpsc;
 
 /// Application-Layer Protocol Negotiation for OpenPodcast studio sessions.
 pub const ALPN: &[u8] = b"openpodcast/1";
+
+/// Max guests in addition to the host (total people = 1 + MAX_GUESTS).
+pub const MAX_GUESTS: usize = 3;
 
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(25);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
@@ -38,6 +42,9 @@ pub enum PeerMessage {
         password: String,
         name: String,
         participant_id: String,
+        /// Empty / "studio" = normal lobby join. "transfer" = deliver HQ tracks only.
+        #[serde(default)]
+        purpose: String,
     },
     Admit {
         participant_id: String,
@@ -70,6 +77,9 @@ pub enum PeerMessage {
         file_name: String,
         size: u64,
         sha256: String,
+        /// Guest resumes from this byte if a prior upload was interrupted.
+        #[serde(default)]
+        resume_from: u64,
     },
     FileChunk {
         file_name: String,
@@ -78,6 +88,11 @@ pub enum PeerMessage {
     },
     FileDone {
         file_name: String,
+    },
+    /// Host → guest: bytes already on disk (optional; resume_from is primary).
+    FileAck {
+        file_name: String,
+        received: u64,
     },
     Reaction {
         from: String,
@@ -107,15 +122,45 @@ pub struct PreviewEvent {
     pub pcm_b64: Option<String>,
 }
 
+/// Full studio roster (host + guests) for every participant's stage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RosterEvent {
+    pub peers: Vec<PeerInfo>,
+}
+
+/// Host → guest record control (start/stop HQ local capture).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RecordEvent {
+    Start {
+        session_id: String,
+        started_at_ms: i64,
+    },
+    Stop,
+}
+
+/// Guest → host HQ track transfer progress.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransferEvent {
+    pub participant_id: String,
+    pub file_name: String,
+    pub status: String,
+    pub bytes_received: u64,
+    pub total_bytes: u64,
+}
+
 pub type PreviewBus = tokio::sync::broadcast::Sender<PreviewEvent>;
+pub type RosterBus = tokio::sync::broadcast::Sender<RosterEvent>;
+pub type RecordBus = tokio::sync::broadcast::Sender<RecordEvent>;
+pub type TransferBus = tokio::sync::broadcast::Sender<TransferEvent>;
 pub type GuestSend = Arc<tokio::sync::Mutex<iroh::endpoint::SendStream>>;
 
 /// Bi-directional peer session over iroh QUIC.
 pub struct PeerStream {
-    _endpoint: Endpoint,
-    _conn: iroh::endpoint::Connection,
-    send: iroh::endpoint::SendStream,
-    recv: iroh::endpoint::RecvStream,
+    pub(crate) _endpoint: Endpoint,
+    pub(crate) _conn: iroh::endpoint::Connection,
+    pub(crate) send: iroh::endpoint::SendStream,
+    pub(crate) recv: iroh::endpoint::RecvStream,
 }
 
 /// Keeps the guest↔host QUIC session alive after join (Waiting / Admit).
@@ -159,8 +204,13 @@ pub async fn send_preview_on(
 }
 
 impl PeerStream {
-    /// Hold the connection open; forward host preview/admit frames to the UI bus.
-    pub fn hold_open(self, preview_tx: PreviewBus) -> GuestSession {
+    /// Hold the connection open; forward host preview/admit/roster/record frames to UI buses.
+    pub fn hold_open(
+        self,
+        preview_tx: PreviewBus,
+        roster_tx: RosterBus,
+        record_tx: RecordBus,
+    ) -> GuestSession {
         let PeerStream {
             _endpoint,
             _conn,
@@ -189,6 +239,25 @@ impl PeerStream {
                             pcm_b64: None,
                         });
                     }
+                    Ok(PeerMessage::PeerList { peers }) => {
+                        let _ = roster_tx.send(RosterEvent { peers });
+                    }
+                    Ok(PeerMessage::RecordStart {
+                        session_id,
+                        started_at_ms,
+                    }) => {
+                        let _ = record_tx.send(RecordEvent::Start {
+                            session_id,
+                            started_at_ms,
+                        });
+                    }
+                    Ok(PeerMessage::RecordStop) => {
+                        let _ = record_tx.send(RecordEvent::Stop);
+                    }
+                    Ok(PeerMessage::FileAck { .. }) => {
+                        // Consumed by send_file_on while holding the send side;
+                        // acks during idle are ignored.
+                    }
                     Ok(PeerMessage::Leave { .. }) | Err(_) => break,
                     Ok(_) => {}
                 }
@@ -212,7 +281,10 @@ pub struct StudioHost {
     /// Shared with the accept loop so renamed hosts show up for new joiners.
     live_host_name: Arc<Mutex<String>>,
     guest_sends: Arc<Mutex<HashMap<String, GuestSend>>>,
+    /// Host session folder that receives guest HQ tracks during/after a take.
+    track_inbox: Arc<Mutex<Option<PathBuf>>>,
     _preview_tx: PreviewBus,
+    _roster_tx: RosterBus,
 }
 
 /// Wait until the endpoint has a relay URL (required for cross-network dials).
@@ -239,6 +311,8 @@ impl StudioHost {
         studio: StudioSettings,
         host_name: String,
         preview_tx: PreviewBus,
+        roster_tx: RosterBus,
+        transfer_tx: TransferBus,
     ) -> Result<Self, String> {
         let endpoint = Endpoint::builder(presets::N0)
             .alpns(vec![ALPN.to_vec()])
@@ -266,13 +340,17 @@ impl StudioHost {
 
         let peers = Arc::new(Mutex::new(HashMap::new()));
         let guest_sends = Arc::new(Mutex::new(HashMap::new()));
+        let track_inbox = Arc::new(Mutex::new(None));
         let (tx, mut rx) = mpsc::channel::<()>(1);
         let peers_c = peers.clone();
         let guest_sends_c = guest_sends.clone();
+        let track_inbox_c = track_inbox.clone();
+        let transfer_tx_c = transfer_tx.clone();
         let password_c = password.clone();
         let host_name_c = Arc::new(Mutex::new(host_name));
         let host_name_accept = host_name_c.clone();
         let preview_tx_c = preview_tx.clone();
+        let roster_tx_c = roster_tx.clone();
         let ep_accept = endpoint.clone();
         let ep_keepalive = endpoint.clone();
 
@@ -295,9 +373,13 @@ impl StudioHost {
                         let Some(incoming) = incoming else { break };
                         let peers = peers_c.clone();
                         let guest_sends = guest_sends_c.clone();
+                        let track_inbox = track_inbox_c.clone();
+                        let transfer_tx = transfer_tx_c.clone();
                         let password = password_c.clone();
                         let host_name = host_name_accept.lock().clone();
+                        let live_host_name = host_name_accept.clone();
                         let preview_tx = preview_tx_c.clone();
+                        let roster_tx = roster_tx_c.clone();
                         tokio::spawn(async move {
                             let accepting = match incoming.accept() {
                                 Ok(a) => a,
@@ -312,9 +394,13 @@ impl StudioHost {
                                         conn,
                                         password,
                                         host_name,
+                                        live_host_name,
                                         peers,
                                         guest_sends,
+                                        track_inbox,
+                                        transfer_tx,
                                         preview_tx,
+                                        roster_tx,
                                     )
                                     .await
                                     {
@@ -339,7 +425,9 @@ impl StudioHost {
             shutdown: Arc::new(Mutex::new(Some(tx))),
             live_host_name: host_name_c,
             guest_sends,
+            track_inbox,
             _preview_tx: preview_tx,
+            _roster_tx: roster_tx,
         })
     }
 
@@ -363,9 +451,21 @@ impl StudioHost {
         self.ticket.host_name = host_name;
     }
 
-    pub fn admit(&self, participant_id: &str) {
-        if let Some(p) = self.peers.lock().get_mut(participant_id) {
+    pub fn admit(&self, participant_id: &str) -> Result<(), String> {
+        let mut peers = self.peers.lock();
+        let admitted = peers.values().filter(|p| p.admitted).count();
+        let already = peers.get(participant_id).map(|p| p.admitted).unwrap_or(false);
+        if !already && admitted >= MAX_GUESTS {
+            return Err(format!(
+                "Studio is full (max {MAX_GUESTS} guests / {} people).",
+                MAX_GUESTS + 1
+            ));
+        }
+        if let Some(p) = peers.get_mut(participant_id) {
             p.admitted = true;
+            Ok(())
+        } else {
+            Err("Guest not found".into())
         }
     }
 
@@ -373,8 +473,50 @@ impl StudioHost {
         self.peers.lock().values().cloned().collect()
     }
 
+    pub fn roster_with_host(&self) -> Vec<PeerInfo> {
+        build_roster(&self.peers, &self.live_host_name.lock())
+    }
+
     pub fn guest_send_handles(&self) -> Vec<GuestSend> {
         self.guest_sends.lock().values().cloned().collect()
+    }
+
+    pub fn admitted_guest_ids(&self) -> Vec<String> {
+        self.peers
+            .lock()
+            .values()
+            .filter(|p| p.admitted)
+            .map(|p| p.id.clone())
+            .collect()
+    }
+
+    pub fn set_track_inbox(&self, dir: Option<PathBuf>) {
+        *self.track_inbox.lock() = dir;
+    }
+
+    pub async fn broadcast_record_start(&self, session_id: String, started_at_ms: i64) {
+        let targets = self.guest_send_handles();
+        let msg = PeerMessage::RecordStart {
+            session_id,
+            started_at_ms,
+        };
+        for send in targets {
+            let mut guard = send.lock().await;
+            if let Err(e) = write_frame(&mut guard, &msg).await {
+                tracing::warn!("RecordStart send failed: {e}");
+            }
+        }
+    }
+
+    pub async fn broadcast_record_stop(&self) {
+        let targets = self.guest_send_handles();
+        let msg = PeerMessage::RecordStop;
+        for send in targets {
+            let mut guard = send.lock().await;
+            if let Err(e) = write_frame(&mut guard, &msg).await {
+                tracing::warn!("RecordStop send failed: {e}");
+            }
+        }
     }
 
     pub fn shutdown(&self) {
@@ -382,16 +524,94 @@ impl StudioHost {
             let _ = tx.try_send(());
         }
         self.guest_sends.lock().clear();
+        *self.track_inbox.lock() = None;
     }
+}
+
+fn build_roster(peers: &Mutex<HashMap<String, PeerInfo>>, host_name: &str) -> Vec<PeerInfo> {
+    let mut list = vec![PeerInfo {
+        id: "host".into(),
+        name: host_name.to_string(),
+        role: "Host".into(),
+        admitted: true,
+    }];
+    list.extend(peers.lock().values().cloned());
+    list
+}
+
+async fn publish_roster(
+    peers: &Mutex<HashMap<String, PeerInfo>>,
+    guest_sends: &Mutex<HashMap<String, GuestSend>>,
+    host_name: &str,
+    roster_tx: &RosterBus,
+) {
+    let list = build_roster(peers, host_name);
+    let _ = roster_tx.send(RosterEvent {
+        peers: list.clone(),
+    });
+    let targets: Vec<GuestSend> = guest_sends.lock().values().cloned().collect();
+    let msg = PeerMessage::PeerList { peers: list };
+    for send in targets {
+        let mut guard = send.lock().await;
+        if let Err(e) = write_frame(&mut guard, &msg).await {
+            tracing::warn!("roster send failed: {e}");
+        }
+    }
+}
+
+async fn forward_preview_except(
+    guest_sends: &Mutex<HashMap<String, GuestSend>>,
+    except_id: &str,
+    participant_id: String,
+    jpeg_b64: Option<String>,
+    pcm_b64: Option<String>,
+) {
+    let targets: Vec<GuestSend> = guest_sends
+        .lock()
+        .iter()
+        .filter(|(id, _)| id.as_str() != except_id)
+        .map(|(_, s)| s.clone())
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    let msg = PeerMessage::PreviewFrame {
+        participant_id,
+        jpeg_b64,
+        pcm_b64,
+    };
+    for send in targets {
+        let mut guard = send.lock().await;
+        if let Err(e) = write_frame(&mut guard, &msg).await {
+            tracing::warn!("forward preview failed: {e}");
+        }
+    }
+}
+
+fn safe_track_file_name(name: &str) -> Option<String> {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    if base.is_empty() || base.contains("..") {
+        return None;
+    }
+    let ok = (base.contains("-audio.") || base.contains("-video."))
+        && (base.ends_with(".wav")
+            || base.ends_with(".webm")
+            || base.ends_with(".mp4")
+            || base.ends_with(".mkv"));
+    ok.then(|| base.to_string())
 }
 
 async fn handle_guest(
     conn: iroh::endpoint::Connection,
     password: String,
     host_name: String,
+    live_host_name: Arc<Mutex<String>>,
     peers: Arc<Mutex<HashMap<String, PeerInfo>>>,
     guest_sends: Arc<Mutex<HashMap<String, GuestSend>>>,
+    track_inbox: Arc<Mutex<Option<PathBuf>>>,
+    transfer_tx: TransferBus,
     preview_tx: PreviewBus,
+    roster_tx: RosterBus,
 ) -> Result<(), String> {
     let (send, mut recv) = conn
         .accept_bi()
@@ -405,53 +625,39 @@ async fn handle_guest(
             password: pw,
             name,
             participant_id,
+            purpose,
         } => {
             if pw != password {
-                {
+                let mut s = send.lock().await;
+                write_frame(
+                    &mut s,
+                    &PeerMessage::Deny {
+                        reason: "Invalid studio password".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+
+            let transfer_only = purpose == "transfer";
+            if transfer_only {
+                if track_inbox.lock().is_none() {
                     let mut s = send.lock().await;
                     write_frame(
                         &mut s,
                         &PeerMessage::Deny {
-                            reason: "Invalid studio password".into(),
+                            reason: "Host is not collecting tracks for this session right now."
+                                .into(),
                         },
                     )
                     .await?;
+                    return Ok(());
                 }
-                return Ok(());
-            }
-            tracing::info!(%participant_id, %name, "guest hello — waiting for admit");
-            peers.lock().insert(
-                participant_id.clone(),
-                PeerInfo {
-                    id: participant_id.clone(),
-                    name: name.clone(),
-                    role: "Guest".into(),
-                    admitted: false,
-                },
-            );
-            guest_sends
-                .lock()
-                .insert(participant_id.clone(), send.clone());
-            {
-                let mut s = send.lock().await;
-                write_frame(
-                    &mut s,
-                    &PeerMessage::Waiting {
-                        participant_id: participant_id.clone(),
-                        name,
-                        host_name,
-                    },
-                )
-                .await?;
-            }
-
-            loop {
-                let admitted = peers
+                tracing::info!(%participant_id, %name, "guest transfer hello");
+                guest_sends
                     .lock()
-                    .get(&participant_id)
-                    .map(|p| p.admitted)
-                    .unwrap_or(false);
-                if admitted {
+                    .insert(participant_id.clone(), send.clone());
+                {
                     let mut s = send.lock().await;
                     write_frame(
                         &mut s,
@@ -460,16 +666,84 @@ async fn handle_guest(
                         },
                     )
                     .await?;
-                    break;
                 }
-                tokio::time::sleep(Duration::from_millis(200)).await;
+            } else {
+                if peers.lock().len() >= MAX_GUESTS {
+                    let mut s = send.lock().await;
+                    write_frame(
+                        &mut s,
+                        &PeerMessage::Deny {
+                            reason: format!("Studio is full (max {MAX_GUESTS} guests)."),
+                        },
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                tracing::info!(%participant_id, %name, "guest hello — waiting for admit");
+                peers.lock().insert(
+                    participant_id.clone(),
+                    PeerInfo {
+                        id: participant_id.clone(),
+                        name: name.clone(),
+                        role: "Guest".into(),
+                        admitted: false,
+                    },
+                );
+                guest_sends
+                    .lock()
+                    .insert(participant_id.clone(), send.clone());
+                {
+                    let mut s = send.lock().await;
+                    write_frame(
+                        &mut s,
+                        &PeerMessage::Waiting {
+                            participant_id: participant_id.clone(),
+                            name,
+                            host_name: host_name.clone(),
+                        },
+                    )
+                    .await?;
+                }
+                {
+                    let name = live_host_name.lock().clone();
+                    publish_roster(&peers, &guest_sends, &name, &roster_tx).await;
+                }
+                loop {
+                    let admitted = peers
+                        .lock()
+                        .get(&participant_id)
+                        .map(|p| p.admitted)
+                        .unwrap_or(false);
+                    if admitted {
+                        let mut s = send.lock().await;
+                        write_frame(
+                            &mut s,
+                            &PeerMessage::Admit {
+                                participant_id: participant_id.clone(),
+                            },
+                        )
+                        .await?;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                {
+                    let name = live_host_name.lock().clone();
+                    publish_roster(&peers, &guest_sends, &name, &roster_tx).await;
+                }
             }
 
+            // Shared loop: live studio media + (resumable) HQ track receive.
+            let mut incoming: HashMap<String, (std::fs::File, u64, u64, String)> = HashMap::new();
             loop {
                 match read_frame(&mut recv).await {
                     Ok(PeerMessage::Leave { .. }) => {
                         peers.lock().remove(&participant_id);
                         guest_sends.lock().remove(&participant_id);
+                        if !transfer_only {
+                            let name = live_host_name.lock().clone();
+                            publish_roster(&peers, &guest_sends, &name, &roster_tx).await;
+                        }
                         break;
                     }
                     Ok(PeerMessage::PreviewFrame {
@@ -477,24 +751,117 @@ async fn handle_guest(
                         jpeg_b64,
                         pcm_b64,
                     }) => {
+                        if transfer_only {
+                            continue;
+                        }
                         let _ = preview_tx.send(PreviewEvent {
-                            participant_id: pid,
+                            participant_id: pid.clone(),
+                            jpeg_b64: jpeg_b64.clone(),
+                            pcm_b64: pcm_b64.clone(),
+                        });
+                        forward_preview_except(
+                            &guest_sends,
+                            &pid,
+                            pid.clone(),
                             jpeg_b64,
                             pcm_b64,
-                        });
+                        )
+                        .await;
                     }
                     Ok(PeerMessage::FileOffer {
-                        participant_id,
+                        participant_id: pid,
                         file_name,
-                        size: _,
+                        size,
                         sha256: _,
+                        resume_from,
                     }) => {
-                        let _ = (participant_id, file_name);
+                        let Some(safe) = safe_track_file_name(&file_name) else {
+                            tracing::warn!("rejecting unsafe track name {file_name}");
+                            continue;
+                        };
+                        let Some(dir) = track_inbox.lock().clone() else {
+                            tracing::warn!("track inbox not set; dropping {safe}");
+                            continue;
+                        };
+                        let dest = dir.join(&safe);
+                        let existing = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+                        let start = resume_from.min(existing).min(size);
+                        match open_track_file(&dest, start) {
+                            Ok(f) => {
+                                incoming.insert(safe.clone(), (f, size, start, pid.clone()));
+                                {
+                                    let mut s = send.lock().await;
+                                    let _ = write_frame(
+                                        &mut s,
+                                        &PeerMessage::FileAck {
+                                            file_name: safe.clone(),
+                                            received: start,
+                                        },
+                                    )
+                                    .await;
+                                }
+                                let _ = transfer_tx.send(TransferEvent {
+                                    participant_id: pid,
+                                    file_name: safe,
+                                    status: "receiving".into(),
+                                    bytes_received: start,
+                                    total_bytes: size,
+                                });
+                            }
+                            Err(e) => tracing::warn!("open track file failed: {e}"),
+                        }
+                    }
+                    Ok(PeerMessage::FileChunk {
+                        file_name,
+                        offset: _,
+                        data_b64,
+                    }) => {
+                        let Some(safe) = safe_track_file_name(&file_name) else {
+                            continue;
+                        };
+                        if let Some((file, total, received, pid)) = incoming.get_mut(&safe) {
+                            match base64::engine::general_purpose::STANDARD.decode(&data_b64) {
+                                Ok(bytes) => {
+                                    if let Err(e) = file.write_all(&bytes) {
+                                        tracing::warn!("write track chunk failed: {e}");
+                                        continue;
+                                    }
+                                    *received += bytes.len() as u64;
+                                    let _ = transfer_tx.send(TransferEvent {
+                                        participant_id: pid.clone(),
+                                        file_name: safe,
+                                        status: "receiving".into(),
+                                        bytes_received: *received,
+                                        total_bytes: *total,
+                                    });
+                                }
+                                Err(e) => tracing::warn!("bad track chunk: {e}"),
+                            }
+                        }
+                    }
+                    Ok(PeerMessage::FileDone { file_name }) => {
+                        let Some(safe) = safe_track_file_name(&file_name) else {
+                            continue;
+                        };
+                        if let Some((mut file, total, received, pid)) = incoming.remove(&safe) {
+                            let _ = file.flush();
+                            let _ = transfer_tx.send(TransferEvent {
+                                participant_id: pid,
+                                file_name: safe,
+                                status: "done".into(),
+                                bytes_received: received,
+                                total_bytes: total,
+                            });
+                        }
                     }
                     Ok(_) => {}
                     Err(_) => {
                         peers.lock().remove(&participant_id);
                         guest_sends.lock().remove(&participant_id);
+                        if !transfer_only {
+                            let name = live_host_name.lock().clone();
+                            publish_roster(&peers, &guest_sends, &name, &roster_tx).await;
+                        }
                         break;
                     }
                 }
@@ -503,6 +870,23 @@ async fn handle_guest(
         _ => {}
     }
     Ok(())
+}
+
+fn open_track_file(path: &PathBuf, resume_from: u64) -> Result<std::fs::File, String> {
+    use std::io::{Seek, SeekFrom};
+    if resume_from == 0 {
+        return std::fs::File::create(path).map_err(|e| e.to_string());
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .read(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    f.set_len(resume_from).map_err(|e| e.to_string())?;
+    f.seek(SeekFrom::Start(resume_from))
+        .map_err(|e| e.to_string())?;
+    Ok(f)
 }
 
 pub async fn join_studio(
@@ -550,6 +934,7 @@ pub async fn join_studio(
                 password,
                 name,
                 participant_id,
+                purpose: String::new(),
             },
         )
         .await?;
@@ -587,6 +972,64 @@ pub async fn join_studio(
         Ok(Err(e)) => Err(e),
         Err(_) => Err(
             "Timed out reaching the host. Ask them to Copy invite again while the studio is open, keep both apps online, and allow OpenPodcast through the firewall."
+                .into(),
+        ),
+    }
+}
+
+/// Reconnect only to push HQ tracks — no lobby seat required.
+pub async fn join_for_transfer(
+    ticket: &InviteTicket,
+    name: String,
+    participant_id: String,
+) -> Result<PeerStream, String> {
+    if ticket.version != 2 || ticket.iroh_ticket.trim().is_empty() {
+        return Err("Need a current invite while the host is still collecting tracks.".into());
+    }
+    let addr = parse_iroh_addr(&ticket.iroh_ticket)?;
+    let endpoint = Endpoint::bind(presets::N0)
+        .await
+        .map_err(|e| format!("Failed to start transfer network: {e}"))?;
+    wait_until_dialable(&endpoint).await?;
+    let password = ticket.password.clone();
+    let connect = async {
+        let conn = endpoint
+            .connect(addr, ALPN)
+            .await
+            .map_err(|e| format!("Could not reach host: {e}"))?;
+        let (mut send, mut recv) = conn
+            .open_bi()
+            .await
+            .map_err(|e| format!("Could not open transfer stream: {e}"))?;
+        write_frame(
+            &mut send,
+            &PeerMessage::Hello {
+                password,
+                name,
+                participant_id: participant_id.clone(),
+                purpose: "transfer".into(),
+            },
+        )
+        .await?;
+        match read_frame(&mut recv).await? {
+            PeerMessage::Admit { .. } => {}
+            PeerMessage::Deny { reason } => return Err(reason),
+            other => {
+                return Err(format!("Unexpected host response for transfer: {other:?}"));
+            }
+        }
+        Ok(PeerStream {
+            _endpoint: endpoint.clone(),
+            _conn: conn,
+            send,
+            recv,
+        })
+    };
+    match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(
+            "Timed out reaching host for track delivery. Host must keep the studio open (or reopen collection)."
                 .into(),
         ),
     }
@@ -650,7 +1093,16 @@ pub async fn fanout_preview(
     Ok(())
 }
 
-async fn write_frame(
+pub async fn fanout_message(targets: Vec<GuestSend>, msg: PeerMessage) {
+    for send in targets {
+        let mut guard = send.lock().await;
+        if let Err(e) = write_frame(&mut guard, &msg).await {
+            tracing::warn!("fanout failed: {e}");
+        }
+    }
+}
+
+pub(crate) async fn write_frame(
     send: &mut iroh::endpoint::SendStream,
     msg: &PeerMessage,
 ) -> Result<(), String> {
@@ -681,53 +1133,130 @@ async fn read_frame(recv: &mut iroh::endpoint::RecvStream) -> Result<PeerMessage
     serde_json::from_slice(&buf).map_err(|e| e.to_string())
 }
 
-pub async fn send_file(
-    stream: &mut PeerStream,
+pub async fn send_file_on(
+    send: GuestSend,
     participant_id: &str,
     path: &PathBuf,
+    resume_from: u64,
+    progress_key: Option<(String, String)>,
+    progress_tx: Option<TransferBus>,
 ) -> Result<(), String> {
     use sha2::{Digest, Sha256};
-    let data = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
-    let mut hasher = Sha256::new();
-    hasher.update(&data);
-    let sha = hex::encode(hasher.finalize());
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let meta = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| format!("track stat: {e}"))?;
+    let size = meta.len();
     let file_name = path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("track.bin")
         .to_string();
+    let resume_from = resume_from.min(size);
+
+    // Stream hash then stream send — keep multi-GB podcasts off the heap.
+    let mut hasher = Sha256::new();
+    {
+        let mut f = tokio::fs::File::open(path)
+            .await
+            .map_err(|e| format!("open track: {e}"))?;
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            let n = f.read(&mut buf).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+    }
+    let sha = hex::encode(hasher.finalize());
+
+    let mut guard = send.lock().await;
     write_frame(
-        &mut stream.send,
+        &mut guard,
         &PeerMessage::FileOffer {
             participant_id: participant_id.into(),
             file_name: file_name.clone(),
-            size: data.len() as u64,
+            size,
             sha256: sha,
+            resume_from,
         },
     )
     .await?;
-    const CHUNK: usize = 64 * 1024;
-    for (i, chunk) in data.chunks(CHUNK).enumerate() {
-        let offset = (i * CHUNK) as u64;
+
+    if resume_from >= size {
         write_frame(
-            &mut stream.send,
-            &PeerMessage::FileChunk {
+            &mut guard,
+            &PeerMessage::FileDone {
                 file_name: file_name.clone(),
-                offset,
-                data_b64: base64::engine::general_purpose::STANDARD.encode(chunk),
             },
         )
         .await?;
+        return Ok(());
+    }
+
+    let mut f = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("open track: {e}"))?;
+    f.seek(std::io::SeekFrom::Start(resume_from))
+        .await
+        .map_err(|e| e.to_string())?;
+    // 256 KiB chunks — fewer JSON frames for hour-long takes.
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut offset = resume_from;
+    let mut since_persist = 0u64;
+    let emit = |bytes: u64, status: &str| {
+        if let Some(tx) = progress_tx.as_ref() {
+            let _ = tx.send(TransferEvent {
+                participant_id: participant_id.to_string(),
+                file_name: file_name.clone(),
+                status: status.into(),
+                bytes_received: bytes,
+                total_bytes: size,
+            });
+        }
+    };
+    emit(resume_from, "sending");
+    loop {
+        let n = f.read(&mut buf).await.map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        write_frame(
+            &mut guard,
+            &PeerMessage::FileChunk {
+                file_name: file_name.clone(),
+                offset,
+                data_b64: base64::engine::general_purpose::STANDARD.encode(&buf[..n]),
+            },
+        )
+        .await?;
+        offset += n as u64;
+        since_persist += n as u64;
+        emit(offset, "sending");
+        // Persist resume cursor every ~8 MiB so a drop mid-podcast can continue.
+        if since_persist >= 8 * 1024 * 1024 {
+            since_persist = 0;
+            if let Some((id, name)) = progress_key.as_ref() {
+                let _ = crate::transfer_queue::update_offset(id, name, offset);
+            }
+        }
+    }
+    if let Some((id, name)) = progress_key.as_ref() {
+        let _ = crate::transfer_queue::update_offset(id, name, offset);
     }
     write_frame(
-        &mut stream.send,
+        &mut guard,
         &PeerMessage::FileDone {
             file_name: file_name.clone(),
         },
     )
     .await?;
+    emit(size, "done");
     Ok(())
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -767,9 +1296,18 @@ mod tests {
             resolution: "1080p".into(),
         };
         let (preview_tx, _preview_rx) = tokio::sync::broadcast::channel(16);
-        let host = StudioHost::start(studio, "Host".into(), preview_tx.clone())
-            .await
-            .expect("host start");
+        let (roster_tx, _roster_rx) = tokio::sync::broadcast::channel(8);
+        let (transfer_tx, _transfer_rx) = tokio::sync::broadcast::channel(8);
+        let (record_tx, _record_rx) = tokio::sync::broadcast::channel(8);
+        let host = StudioHost::start(
+            studio,
+            "Host".into(),
+            preview_tx.clone(),
+            roster_tx.clone(),
+            transfer_tx,
+        )
+        .await
+        .expect("host start");
         let invite = host.encode_ticket().expect("encode");
         let ticket = decode_ticket(&invite).expect("decode");
         assert_eq!(ticket.version, 2);
@@ -786,13 +1324,13 @@ mod tests {
             peers.iter().any(|p| p.id == "guest-1" && !p.admitted),
             "expected waiting guest in peer list: {peers:?}"
         );
-        let _session = stream.hold_open(preview_tx);
+        let _session = stream.hold_open(preview_tx, roster_tx, record_tx);
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(
             host.peer_list().iter().any(|p| p.id == "guest-1"),
             "guest must stay visible while session is held open"
         );
-        host.admit("guest-1");
+        host.admit("guest-1").expect("admit");
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert!(
             host.peer_list()
@@ -801,6 +1339,36 @@ mod tests {
             "expected admitted guest: {:?}",
             host.peer_list()
         );
+        let roster = host.roster_with_host();
+        assert!(roster.iter().any(|p| p.id == "host"));
+        assert!(roster.iter().any(|p| p.id == "guest-1" && p.admitted));
+
+        // Fill remaining guest slots, then admit must refuse a 4th guest.
+        for i in 2..=MAX_GUESTS {
+            let id = format!("guest-{i}");
+            host.peers.lock().insert(
+                id.clone(),
+                PeerInfo {
+                    id: id.clone(),
+                    name: format!("Guest {i}"),
+                    role: "Guest".into(),
+                    admitted: false,
+                },
+            );
+            host.admit(&id).expect("admit within cap");
+        }
+        host.peers.lock().insert(
+            "guest-overflow".into(),
+            PeerInfo {
+                id: "guest-overflow".into(),
+                name: "Too Many".into(),
+                role: "Guest".into(),
+                admitted: false,
+            },
+        );
+        let err = host.admit("guest-overflow").expect_err("4th guest blocked");
+        assert!(err.contains("full"), "{err}");
+
         drop(_session);
         host.shutdown();
     }
