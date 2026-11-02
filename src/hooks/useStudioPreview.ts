@@ -8,10 +8,10 @@ type PreviewEvent = {
   pcm_b64?: string | null;
 };
 
-const TARGET_W = 320;
-const TARGET_H = 180;
-const JPEG_QUALITY = 0.42;
-const VIDEO_FPS = 12;
+const TARGET_W = 640;
+const TARGET_H = 360;
+const JPEG_QUALITY = 0.72;
+const VIDEO_FPS = 15;
 /** Wire format for mic PCM. */
 const PCM_RATE = 16000;
 const AUDIO_FLUSH_MS = 30;
