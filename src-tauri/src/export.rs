@@ -205,6 +205,9 @@ pub fn render_final_video(
         if let Some(a) = &t.audio {
             args.push("-i".into());
             args.push(a.to_string_lossy().into());
+            // Downmix odd layouts (e.g. 3.0 from some USB mics) to stereo AAC.
+            args.push("-filter:a".into());
+            args.push("aresample=48000:ocl=stereo".into());
         }
         args.push("-t".into());
         args.push(format!("{duration_secs:.3}"));
@@ -285,25 +288,55 @@ pub fn render_final_video(
     let mut next_in = 1usize; // 0 is canvas
 
     for t in &tracks {
-        if let Some(v) = &t.video {
-            // Video is not padded at finalize — delay onto the take timeline.
-            if t.offset_ms > 0 {
-                args.push("-itsoffset".into());
-                args.push(format!("{:.3}", t.offset_ms as f64 / 1000.0));
+        // Only feed containers that actually expose a video stream — chunked /
+        // cam-off MediaRecorder files are often audio-only or unreadable as :v.
+        let video_idx = if let Some(v) = &t.video {
+            if media_has_stream(&ffmpeg, v, StreamKind::Video) {
+                if t.offset_ms > 0 {
+                    args.push("-itsoffset".into());
+                    args.push(format!("{:.3}", t.offset_ms as f64 / 1000.0));
+                }
+                args.push("-i".into());
+                args.push(v.to_string_lossy().into());
+                let idx = next_in;
+                next_in += 1;
+                Some(idx)
+            } else {
+                tracing::warn!(
+                    "skipping video without a video stream: {}",
+                    v.display()
+                );
+                None
             }
-            args.push("-i".into());
-            args.push(v.to_string_lossy().into());
-            video_input_idx.push(Some(next_in));
-            next_in += 1;
         } else {
-            video_input_idx.push(None);
-        }
+            None
+        };
+        video_input_idx.push(video_idx);
+
         if let Some(a) = &t.audio {
-            // WAV already padded in finalize_session — no itsoffset.
-            args.push("-i".into());
-            args.push(a.to_string_lossy().into());
-            audio_input_idx.push(Some(next_in));
-            next_in += 1;
+            if media_has_stream(&ffmpeg, a, StreamKind::Audio) {
+                args.push("-i".into());
+                args.push(a.to_string_lossy().into());
+                audio_input_idx.push(Some(next_in));
+                next_in += 1;
+            } else {
+                audio_input_idx.push(None);
+            }
+        } else if let Some(v) = &t.video {
+            // No separate WAV — use audio from the media file when present.
+            if media_has_stream(&ffmpeg, v, StreamKind::Audio) {
+                if let Some(vin) = video_idx {
+                    audio_input_idx.push(Some(vin)); // same input, :a in filter
+                } else {
+                    // Audio-only "video" file (cam off) — still mix the sound.
+                    args.push("-i".into());
+                    args.push(v.to_string_lossy().into());
+                    audio_input_idx.push(Some(next_in));
+                    next_in += 1;
+                }
+            } else {
+                audio_input_idx.push(None);
+            }
         } else {
             audio_input_idx.push(None);
         }
@@ -339,16 +372,16 @@ pub fn render_final_video(
         vscale_i += 1;
     }
 
-    // Audio mix with presence gates
+    // Audio mix with presence gates — downmix any channel count to stereo.
     let mut amix_inputs = Vec::new();
     let mut a_i = 0usize;
     for (i, t) in tracks.iter().enumerate() {
         let enable = enable_expr_for(&intervals, &t.participant_id, duration_ms);
         if let Some(ain) = audio_input_idx[i] {
             let lab = format!("a{a_i}");
-            // volume expr is 1 while present, else 0 — preserves join/leave gaps
+            // aresample ocl=stereo downmixes 1.0 / 3.0 / 5.1 etc. before volume gate
             fc.push(format!(
-                "[{ain}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,volume='{enable}'[{lab}]",
+                "[{ain}:a]aresample=48000:ocl=stereo,aformat=sample_fmts=fltp,volume='{enable}'[{lab}]",
                 ain = ain,
                 enable = enable,
                 lab = lab
@@ -356,7 +389,6 @@ pub fn render_final_video(
             amix_inputs.push(lab);
             a_i += 1;
         }
-        // Prefer dedicated WAV tracks; video containers are often silent HQ shells.
     }
 
     if !amix_inputs.is_empty() {
@@ -670,6 +702,41 @@ fn avg_wav_rms(path: Option<&Path>) -> f32 {
         0.0
     } else {
         (sum / n as f64).sqrt() as f32
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StreamKind {
+    Video,
+    Audio,
+}
+
+/// Probe with ffmpeg itself (sidecar often has no ffprobe).
+fn media_has_stream(ffmpeg: &Path, path: &Path, kind: StreamKind) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) < 32 {
+        return false;
+    }
+    let output = Command::new(ffmpeg)
+        .args(["-hide_banner", "-i"])
+        .arg(path)
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    // ffmpeg writes the probe dump to stderr and exits non-zero without an output sink.
+    let probe = String::from_utf8_lossy(&output.stderr);
+    match kind {
+        StreamKind::Video => probe.lines().any(|l| {
+            let l = l.trim();
+            l.contains("Video:") || l.contains(": Video:")
+        }),
+        StreamKind::Audio => probe.lines().any(|l| {
+            let l = l.trim();
+            l.contains("Audio:") || l.contains(": Audio:")
+        }),
     }
 }
 
