@@ -1,0 +1,51 @@
+[package]
+name = "openpodcast"
+version = "0.1.0"
+description = "Local podcast studio — Riverside-style recording on your machine"
+authors = ["OpenPodcast"]
+edition = "2021"
+
+[lib]
+name = "openpodcast_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-opener = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+cpal = "0.15"
+hound = "3.5"
+dirs = "5"
+keyring = "3"
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking", "stream", "multipart"], default-features = false }
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+url = "2"
+urlencoding = "2"
+thiserror = "1"
+anyhow = "1"
+parking_lot = "0.12"
+futures-util = "0.3"
+bytes = "1"
+tracing = "0.1"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

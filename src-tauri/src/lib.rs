@@ -1,0 +1,820 @@
+mod capture;
+mod db;
+mod drive;
+mod export;
+mod models;
+mod native_stt;
+mod p2p;
+mod paths;
+mod settings;
+mod whisper;
+
+use capture::AudioRecorder;
+use db::Database;
+use models::*;
+use parking_lot::Mutex;
+use p2p::StudioHost;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tauri::State;
+use uuid::Uuid;
+
+pub struct AppState {
+    pub db: Database,
+    pub host: Mutex<Option<StudioHost>>,
+    pub recorders: Mutex<HashMap<String, AudioRecorder>>,
+    pub active_session: Mutex<Option<String>>,
+}
+
+impl AppState {
+    fn new() -> Result<Self, String> {
+        Ok(Self {
+            db: Database::open()?,
+            host: Mutex::new(None),
+            recorders: Mutex::new(HashMap::new()),
+            active_session: Mutex::new(None),
+        })
+    }
+}
+
+#[tauri::command]
+fn get_settings() -> AppSettings {
+    settings::load_settings()
+}
+
+#[tauri::command]
+fn save_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
+    settings::save_settings(&settings)?;
+    Ok(settings::load_settings())
+}
+
+#[tauri::command]
+fn set_ai_provider(base_url: String, api_key: String) -> Result<AppSettings, String> {
+    let mut s = settings::load_settings();
+    s.ai_base_url = if base_url.is_empty() {
+        None
+    } else {
+        Some(base_url)
+    };
+    if !api_key.is_empty() {
+        settings::set_ai_api_key(&api_key)?;
+    }
+    settings::save_settings(&s)?;
+    Ok(settings::load_settings())
+}
+
+#[tauri::command]
+fn get_app_paths() -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({
+        "data": paths::app_data_dir()?.to_string_lossy(),
+        "sessions": paths::sessions_dir()?.to_string_lossy(),
+        "models": paths::models_dir()?.to_string_lossy(),
+    }))
+}
+
+#[tauri::command]
+fn list_sessions(state: State<'_, Arc<AppState>>) -> Result<Vec<SessionRecord>, String> {
+    // Purge lobby-only / never-recorded sessions left over from older builds
+    let all = state.db.list_sessions()?;
+    for s in &all {
+        let has_media = PathBuf::from(&s.local_path)
+            .exists()
+            .then(|| session_has_media_files(&PathBuf::from(&s.local_path)))
+            .unwrap_or(false);
+        if s.duration_secs < 0.4 && !has_media {
+            let _ = state.db.delete_session(&s.id);
+            let _ = std::fs::remove_dir_all(&s.local_path);
+        }
+    }
+    Ok(state
+        .db
+        .list_sessions()?
+        .into_iter()
+        .filter(|s| s.duration_secs >= 0.4 || {
+            PathBuf::from(&s.local_path)
+                .exists()
+                .then(|| session_has_media_files(&PathBuf::from(&s.local_path)))
+                .unwrap_or(false)
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn get_session(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Option<SessionRecord>, String> {
+    state.db.get_session(&id)
+}
+
+#[tauri::command]
+async fn create_studio(
+    state: State<'_, Arc<AppState>>,
+    settings: StudioSettings,
+    host_name: String,
+) -> Result<serde_json::Value, String> {
+    let session_id = Uuid::new_v4().to_string();
+    let dir = paths::session_dir(&session_id)?;
+    let sync = serde_json::json!({
+        "session_id": session_id,
+        "studio": settings,
+        "host_name": host_name,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "offsets_ms": {},
+    });
+    std::fs::write(dir.join("sync.json"), serde_json::to_string_pretty(&sync).unwrap())
+        .map_err(|e| e.to_string())?;
+
+    let host = StudioHost::start(settings.clone(), host_name.clone()).await?;
+    let ticket = host.encode_ticket()?;
+    let peers = host.peer_list();
+    *state.host.lock() = Some(host);
+    *state.active_session.lock() = Some(session_id.clone());
+
+    // Do NOT insert into the recordings DB until the host actually presses
+    // Record and finalize_session runs — lobby/preview must not create episodes.
+    Ok(serde_json::json!({
+        "session_id": session_id,
+        "invite": ticket,
+        "peers": peers,
+    }))
+}
+
+#[tauri::command]
+fn get_invite(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    state
+        .host
+        .lock()
+        .as_ref()
+        .ok_or_else(|| "No active studio".to_string())?
+        .encode_ticket()
+}
+
+#[tauri::command]
+fn list_peers(state: State<'_, Arc<AppState>>) -> Result<Vec<p2p::PeerInfo>, String> {
+    Ok(state
+        .host
+        .lock()
+        .as_ref()
+        .map(|h| h.peer_list())
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+fn admit_guest(state: State<'_, Arc<AppState>>, participant_id: String) -> Result<(), String> {
+    state
+        .host
+        .lock()
+        .as_ref()
+        .ok_or_else(|| "No active studio".to_string())?
+        .admit(&participant_id);
+    Ok(())
+}
+
+#[tauri::command]
+fn decode_invite(invite: String) -> Result<InviteTicket, String> {
+    p2p::decode_ticket(&invite)
+}
+
+#[tauri::command]
+async fn join_studio(
+    invite: String,
+    display_name: String,
+) -> Result<serde_json::Value, String> {
+    let ticket = p2p::decode_ticket(&invite)?;
+    let participant_id = Uuid::new_v4().to_string();
+    let session_id = Uuid::new_v4().to_string();
+    let dir = paths::session_dir(&session_id)?;
+    let sync = serde_json::json!({
+        "session_id": session_id,
+        "studio": ticket.studio,
+        "guest_name": display_name,
+        "participant_id": participant_id,
+        "joined_at": chrono::Utc::now().to_rfc3339(),
+    });
+    std::fs::write(dir.join("sync.json"), serde_json::to_string_pretty(&sync).unwrap())
+        .map_err(|e| e.to_string())?;
+
+    // Attempt connection (may fail if host unreachable — still return ticket info for UI)
+    let connected = p2p::join_studio(&ticket, display_name.clone(), participant_id.clone())
+        .await
+        .is_ok();
+
+    Ok(serde_json::json!({
+        "session_id": session_id,
+        "participant_id": participant_id,
+        "studio": ticket.studio,
+        "host_name": ticket.host_name,
+        "connected": connected,
+        "local_path": dir.to_string_lossy(),
+    }))
+}
+
+#[tauri::command]
+fn list_audio_devices() -> Result<Vec<DeviceInfo>, String> {
+    AudioRecorder::list_input_devices()
+}
+
+#[tauri::command]
+fn start_audio_recording(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    participant_id: String,
+    device_name: Option<String>,
+) -> Result<String, String> {
+    let dir = paths::session_dir(&session_id)?;
+    let path = dir.join(format!("{participant_id}-audio.wav"));
+    let recorder = AudioRecorder::start(path.clone(), device_name)?;
+    state
+        .recorders
+        .lock()
+        .insert(participant_id.clone(), recorder);
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn get_mic_level(state: State<'_, Arc<AppState>>, participant_id: String) -> f32 {
+    state
+        .recorders
+        .lock()
+        .get(&participant_id)
+        .map(|r| r.level())
+        .unwrap_or(0.0)
+}
+
+#[tauri::command]
+fn stop_audio_recording(
+    state: State<'_, Arc<AppState>>,
+    participant_id: String,
+) -> Result<String, String> {
+    let recorder = state
+        .recorders
+        .lock()
+        .remove(&participant_id)
+        .ok_or_else(|| "No active recorder".to_string())?;
+    let path = recorder.stop();
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn save_video_track(
+    session_id: String,
+    participant_id: String,
+    data: Vec<u8>,
+    extension: String,
+) -> Result<String, String> {
+    let dir = paths::session_dir(&session_id)?;
+    let path = dir.join(format!("{participant_id}-video.{extension}"));
+    std::fs::write(&path, data).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn finalize_session(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    duration_secs: f64,
+    participants: Vec<Participant>,
+    pad_offsets_ms: HashMap<String, u64>,
+) -> Result<SessionRecord, String> {
+    let dir = paths::session_dir(&session_id)?;
+    for (pid, pad) in &pad_offsets_ms {
+        let wav = dir.join(format!("{pid}-audio.wav"));
+        if wav.exists() && *pad > 0 {
+            let _ = capture::pad_wav_start(&wav, *pad);
+        }
+    }
+
+    let sync_path = dir.join("sync.json");
+    let mut sync: serde_json::Value = if sync_path.exists() {
+        serde_json::from_str(&std::fs::read_to_string(&sync_path).unwrap_or_default())
+            .unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    sync["duration_secs"] = serde_json::json!(duration_secs);
+    sync["offsets_ms"] = serde_json::to_value(&pad_offsets_ms).unwrap_or_default();
+    sync["participants"] = serde_json::to_value(&participants).unwrap_or_default();
+    std::fs::write(&sync_path, serde_json::to_string_pretty(&sync).unwrap())
+        .map_err(|e| e.to_string())?;
+
+    let existing = state.db.get_session(&session_id)?;
+    let mut record = existing.unwrap_or(SessionRecord {
+        id: session_id.clone(),
+        name: sync["studio"]["name"]
+            .as_str()
+            .unwrap_or("Episode")
+            .to_string(),
+        mode: StudioMode::AudioVideo,
+        frame_rate: 30,
+        resolution: "1080p".into(),
+        created_at: chrono::Utc::now(),
+        duration_secs: 0.0,
+        participants: vec![],
+        has_video: true,
+        local_path: dir.to_string_lossy().to_string(),
+        drive_uploaded: false,
+    });
+    record.duration_secs = duration_secs;
+    record.participants = participants;
+    record.local_path = dir.to_string_lossy().to_string();
+    record.has_video = session_has_video_files(&dir);
+    // Only persist real takes — ignore accidental zero-length finalizes
+    if duration_secs < 0.4 && !session_has_media_files(&dir) {
+        let _ = state.db.delete_session(&session_id);
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err("Recording was too short and was discarded".into());
+    }
+    state.db.upsert_session(&record)?;
+    Ok(record)
+}
+
+fn session_has_video_files(dir: &PathBuf) -> bool {
+    std::fs::read_dir(dir)
+        .ok()
+        .map(|entries| {
+            entries.filter_map(|e| e.ok()).any(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.contains("-video.")
+                    && (name.ends_with(".webm")
+                        || name.ends_with(".mp4")
+                        || name.ends_with(".mov"))
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn session_has_media_files(dir: &PathBuf) -> bool {
+    std::fs::read_dir(dir)
+        .ok()
+        .map(|entries| {
+            entries.filter_map(|e| e.ok()).any(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.ends_with("-audio.wav")
+                    || name.contains("-video.")
+            })
+        })
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn discard_session(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<(), String> {
+    let _ = state.db.delete_session(&session_id);
+    if let Ok(root) = paths::sessions_dir() {
+        let dir = root.join(&session_id);
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+    if state
+        .active_session
+        .lock()
+        .as_ref()
+        .map(|s| s == &session_id)
+        .unwrap_or(false)
+    {
+        *state.active_session.lock() = None;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn leave_studio(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    if let Some(host) = state.host.lock().take() {
+        host.shutdown();
+    }
+    state.recorders.lock().clear();
+    *state.active_session.lock() = None;
+    Ok(())
+}
+
+#[tauri::command]
+fn begin_drive_oauth() -> Result<String, String> {
+    drive::begin_oauth()
+}
+
+#[tauri::command]
+async fn complete_drive_oauth(code: String) -> Result<AppSettings, String> {
+    drive::complete_oauth_with_code(code).await?;
+    let mut s = settings::load_settings();
+    s.drive_connected = true;
+    settings::save_settings(&s)?;
+    Ok(settings::load_settings())
+}
+
+#[tauri::command]
+fn disconnect_drive() -> Result<AppSettings, String> {
+    drive::disconnect()?;
+    Ok(settings::load_settings())
+}
+
+#[tauri::command]
+async fn upload_session_to_drive(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<serde_json::Value, String> {
+    if !drive::is_connected() {
+        return Err("Connect Google Drive in Settings first".into());
+    }
+    let session = state
+        .db
+        .get_session(&session_id)?
+        .ok_or_else(|| "Session not found".to_string())?;
+    let dir = PathBuf::from(&session.local_path);
+    let mut uploaded = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.is_file() {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if matches!(ext, "wav" | "mp4" | "webm" | "srt" | "json") {
+                let id = drive::upload_file(&path, &session.name, |_| {}).await?;
+                uploaded.push(serde_json::json!({
+                    "file": path.file_name().and_then(|n| n.to_str()),
+                    "drive_id": id,
+                }));
+            }
+        }
+    }
+    state.db.mark_drive_uploaded(&session_id)?;
+    Ok(serde_json::json!({ "uploaded": uploaded }))
+}
+
+#[tauri::command]
+fn whisper_model_status() -> serde_json::Value {
+    serde_json::json!({ "ready": whisper::model_ready() })
+}
+
+#[tauri::command]
+async fn download_whisper_model() -> Result<(), String> {
+    whisper::download_model(|_| {}).await?;
+    Ok(())
+}
+
+#[tauri::command]
+fn native_stt_status() -> serde_json::Value {
+    serde_json::json!({
+        "available": native_stt::available(),
+        "engine": native_stt::engine_label(),
+    })
+}
+
+#[tauri::command]
+fn open_speech_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Speech privacy / microphone related settings
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "ms-settings:privacy-speech"])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Err("Speech settings are only available on macOS and Windows".into())
+    }
+}
+
+#[tauri::command]
+async fn generate_captions(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    engine: Option<String>,
+) -> Result<Vec<CaptionCue>, String> {
+    let engine = engine.unwrap_or_else(|| "auto".into());
+    let session = state
+        .db
+        .get_session(&session_id)?
+        .ok_or_else(|| "Session not found".to_string())?;
+    let dir = PathBuf::from(&session.local_path);
+    let mut all = Vec::new();
+    let mut errors = Vec::new();
+
+    async fn transcribe_one(
+        path: &PathBuf,
+        speaker: &str,
+        engine: &str,
+    ) -> Result<Vec<CaptionCue>, String> {
+        match engine {
+            "native" => native_stt::transcribe_wav(path, speaker).await,
+            "ai" => whisper::transcribe_wav_ai_only(path, speaker).await,
+            _ => {
+                // auto: native → AI → local whisper CLI
+                match native_stt::transcribe_wav(path, speaker).await {
+                    Ok(cues) if !cues.is_empty() => Ok(cues),
+                    Ok(_) | Err(_) => whisper::transcribe_wav(path, speaker).await,
+                }
+            }
+        }
+    }
+
+    for p in &session.participants {
+        let wav = dir.join(format!("{}-audio.wav", p.id));
+        if wav.exists() {
+            match transcribe_one(&wav, &p.name, &engine).await {
+                Ok(cues) => all.extend(cues),
+                Err(e) => errors.push(format!("{}: {e}", p.name)),
+            }
+        }
+    }
+    // Also pick up any *-audio.wav not in participants
+    if all.is_empty() {
+        for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.ends_with("-audio.wav") {
+                    let speaker = name.trim_end_matches("-audio.wav");
+                    match transcribe_one(&path, speaker, &engine).await {
+                        Ok(cues) => all.extend(cues),
+                        Err(e) => errors.push(format!("{speaker}: {e}")),
+                    }
+                }
+            }
+        }
+    }
+    if all.is_empty() {
+        if errors.is_empty() {
+            return Err(
+                "No audio tracks found to transcribe. Record in the studio first, or type subtitles manually."
+                    .into(),
+            );
+        }
+        return Err(errors.join("\n"));
+    }
+    let merged = whisper::merge_cues(all);
+    let srt = whisper::cues_to_srt(&merged);
+    std::fs::write(dir.join("captions.srt"), &srt).map_err(|e| e.to_string())?;
+    Ok(merged)
+}
+
+#[tauri::command]
+fn load_captions(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<Vec<CaptionCue>, String> {
+    let session = state
+        .db
+        .get_session(&session_id)?
+        .ok_or_else(|| "Session not found".to_string())?;
+    let path = PathBuf::from(&session.local_path).join("captions.srt");
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    Ok(whisper::parse_srt(&raw))
+}
+
+#[tauri::command]
+fn save_captions(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    cues: Vec<CaptionCue>,
+) -> Result<Vec<CaptionCue>, String> {
+    let session = state
+        .db
+        .get_session(&session_id)?
+        .ok_or_else(|| "Session not found".to_string())?;
+    let dir = PathBuf::from(&session.local_path);
+    let merged = whisper::merge_cues(cues);
+    let srt = whisper::cues_to_srt(&merged);
+    std::fs::write(dir.join("captions.srt"), &srt).map_err(|e| e.to_string())?;
+    Ok(merged)
+}
+
+#[tauri::command]
+async fn generate_show_notes_cmd(transcript: String) -> Result<String, String> {
+    whisper::generate_show_notes(&transcript).await
+}
+
+#[tauri::command]
+fn export_session_cmd(
+    state: State<'_, Arc<AppState>>,
+    req: export::ExportRequest,
+    cues: Vec<CaptionCue>,
+) -> Result<String, String> {
+    let session = state
+        .db
+        .get_session(&req.session_id)?
+        .ok_or_else(|| "Session not found".to_string())?;
+    let dir = PathBuf::from(&session.local_path);
+    let out = export::export_session(&dir, &req, &cues)?;
+    Ok(out.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn list_session_files(session_id: String) -> Result<Vec<String>, String> {
+    let dir = paths::session_dir(&session_id)?;
+    let mut files = Vec::new();
+    if dir.exists() {
+        for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if entry.path().is_file() {
+                files.push(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    Ok(files)
+}
+
+#[derive(serde::Serialize)]
+struct SessionMediaTrack {
+    participant_id: String,
+    video_path: Option<String>,
+    audio_path: Option<String>,
+}
+
+#[tauri::command]
+fn get_session_media(session_id: String) -> Result<Vec<SessionMediaTrack>, String> {
+    let dir = paths::session_dir(&session_id)?;
+    let mut by_id: std::collections::HashMap<String, SessionMediaTrack> =
+        std::collections::HashMap::new();
+
+    if dir.exists() {
+        for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let abs = path.to_string_lossy().to_string();
+            if let Some(pid) = name.strip_suffix("-audio.wav") {
+                by_id
+                    .entry(pid.to_string())
+                    .or_insert_with(|| SessionMediaTrack {
+                        participant_id: pid.to_string(),
+                        video_path: None,
+                        audio_path: None,
+                    })
+                    .audio_path = Some(abs);
+            } else if let Some(pid) = name
+                .strip_suffix("-video.webm")
+                .or_else(|| name.strip_suffix("-video.mp4"))
+                .or_else(|| name.strip_suffix("-video.mkv"))
+            {
+                by_id
+                    .entry(pid.to_string())
+                    .or_insert_with(|| SessionMediaTrack {
+                        participant_id: pid.to_string(),
+                        video_path: None,
+                        audio_path: None,
+                    })
+                    .video_path = Some(abs);
+            }
+        }
+    }
+
+    let mut out: Vec<_> = by_id.into_values().collect();
+    out.sort_by(|a, b| a.participant_id.cmp(&b.participant_id));
+    Ok(out)
+}
+
+#[tauri::command]
+fn save_session_thumbnail(session_id: String, jpeg: Vec<u8>) -> Result<String, String> {
+    if jpeg.is_empty() {
+        return Err("Empty thumbnail".into());
+    }
+    let dir = paths::session_dir(&session_id)?;
+    let path = dir.join("thumbnail.jpg");
+    std::fs::write(&path, jpeg).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn get_session_thumbnail(session_id: String) -> Result<Option<String>, String> {
+    let dir = paths::sessions_dir()?.join(&session_id);
+    let path = dir.join("thumbnail.jpg");
+    if path.is_file() {
+        Ok(Some(path.to_string_lossy().to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+fn reveal_session_folder(session_id: String) -> Result<String, String> {
+    let dir = paths::sessions_dir()?.join(&session_id);
+    if !dir.exists() {
+        return Err("Session folder not found".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(dir.to_string_lossy().to_string())
+}
+
+/// Guest → host track return over the invite TCP session (resumable chunks).
+#[tauri::command]
+async fn return_tracks_to_host(
+    invite: String,
+    participant_id: String,
+    session_id: String,
+) -> Result<Vec<String>, String> {
+    let ticket = p2p::decode_ticket(&invite)?;
+    let mut stream = p2p::join_studio(&ticket, participant_id.clone(), participant_id.clone()).await?;
+    let dir = paths::session_dir(&session_id)?;
+    let mut sent = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.is_file() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.contains("-audio.") || name.contains("-video.") {
+                p2p::send_file(&mut stream, &participant_id, &path).await?;
+                sent.push(name.to_string());
+            }
+        }
+    }
+    Ok(sent)
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let state = AppState::new().expect("failed to init app state");
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
+        .manage(Arc::new(state))
+        .invoke_handler(tauri::generate_handler![
+            get_settings,
+            save_app_settings,
+            set_ai_provider,
+            get_app_paths,
+            list_sessions,
+            get_session,
+            create_studio,
+            get_invite,
+            list_peers,
+            admit_guest,
+            decode_invite,
+            join_studio,
+            list_audio_devices,
+            start_audio_recording,
+            get_mic_level,
+            stop_audio_recording,
+            save_video_track,
+            finalize_session,
+            discard_session,
+            leave_studio,
+            begin_drive_oauth,
+            complete_drive_oauth,
+            disconnect_drive,
+            upload_session_to_drive,
+            whisper_model_status,
+            download_whisper_model,
+            native_stt_status,
+            open_speech_settings,
+            generate_captions,
+            load_captions,
+            save_captions,
+            generate_show_notes_cmd,
+            export_session_cmd,
+            list_session_files,
+            get_session_media,
+            save_session_thumbnail,
+            get_session_thumbnail,
+            reveal_session_folder,
+            return_tracks_to_host,
+        ])
+        .setup(|app| {
+            let _ = app;
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running OpenPodcast");
+}
