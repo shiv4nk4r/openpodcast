@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react";
 
-export type ThemeId = "night-booth" | "signal-dark" | "graphite";
+export type ThemeId = "dark" | "light";
 
 export interface ThemeDef {
   id: ThemeId;
@@ -17,23 +17,30 @@ export interface ThemeDef {
 
 export const THEMES: ThemeDef[] = [
   {
-    id: "night-booth",
-    label: "Night Booth",
-    description: "Graphite stage, phosphor meters, signal red",
+    id: "dark",
+    label: "Dark",
+    description: "Signal Dark — cooler blacks with cyan accents",
   },
   {
-    id: "signal-dark",
-    label: "Signal Dark",
-    description: "Cooler blacks with electric cyan accents",
-  },
-  {
-    id: "graphite",
-    label: "Graphite",
-    description: "Neutral studio grey, soft amber focus",
+    id: "light",
+    label: "Light",
+    description: "Bright surfaces for daytime sessions",
   },
 ];
 
 const STORAGE_KEY = "openpodcast.theme";
+const LEGACY_DARK = new Set([
+  "dark",
+  "signal-dark",
+  "night-booth",
+  "graphite",
+]);
+
+function normalizeTheme(raw: string | null): ThemeId {
+  if (raw === "light") return "light";
+  if (raw && LEGACY_DARK.has(raw)) return "dark";
+  return "dark";
+}
 
 interface ThemeCtx {
   theme: ThemeId;
@@ -43,15 +50,20 @@ interface ThemeCtx {
 
 const Ctx = createContext<ThemeCtx | null>(null);
 
+function applyTheme(id: ThemeId) {
+  document.documentElement.setAttribute("data-theme", id);
+  localStorage.setItem(STORAGE_KEY, id);
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<ThemeId>(() => {
-    const saved = localStorage.getItem(STORAGE_KEY) as ThemeId | null;
-    return THEMES.some((t) => t.id === saved) ? saved! : "night-booth";
+    const initial = normalizeTheme(localStorage.getItem(STORAGE_KEY));
+    applyTheme(initial);
+    return initial;
   });
 
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem(STORAGE_KEY, theme);
+    applyTheme(theme);
   }, [theme]);
 
   const value = useMemo(

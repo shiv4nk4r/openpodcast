@@ -7,6 +7,7 @@ import {
   IconHeadphones,
   IconMicrophone,
   IconMicrophoneOff,
+  IconSettings,
   IconVolume,
   IconWaveSine,
 } from "@tabler/icons-react";
@@ -35,7 +36,6 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
   const [invite, setInvite] = useState("");
 
   const videoMode = (studio?.settings.mode ?? "audio_video") === "audio_video";
-  const studioName = studio?.settings.name ?? "OpenPodcast Studio";
   const resolution = studio?.settings.resolution ?? "1080p";
   const fps = studio?.settings.frame_rate ?? 30;
   const canEditQuality = studio?.role !== "guest";
@@ -228,6 +228,20 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
   if (booting) {
     return (
       <div className="rs-lobby">
+        <header className="rs-lobby-top">
+          <div className="rs-rec-brand">
+            <span className="rs-rec-dot" />
+            OpenPodcast
+          </div>
+          <button
+            type="button"
+            className="rs-rec-back"
+            onClick={() => navigate("/settings")}
+          >
+            <IconSettings size={16} stroke={1.75} />
+            Settings
+          </button>
+        </header>
         <div className="rs-lobby-loading">Preparing your studio…</div>
       </div>
     );
@@ -236,6 +250,20 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
   if (bootError) {
     return (
       <div className="rs-lobby">
+        <header className="rs-lobby-top">
+          <div className="rs-rec-brand">
+            <span className="rs-rec-dot" />
+            OpenPodcast
+          </div>
+          <button
+            type="button"
+            className="rs-rec-back"
+            onClick={() => navigate("/settings")}
+          >
+            <IconSettings size={16} stroke={1.75} />
+            Settings
+          </button>
+        </header>
         <div className="rs-lobby-loading" style={{ color: "var(--record)" }}>
           {bootError}
         </div>
@@ -245,11 +273,28 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
 
   return (
     <div className="rs-lobby">
+      <header className="rs-lobby-top">
+        <div className="rs-rec-brand">
+          <span className="rs-rec-dot" />
+          OpenPodcast
+        </div>
+        <button
+          type="button"
+          className="rs-rec-back"
+          onClick={() => navigate("/settings")}
+        >
+          <IconSettings size={16} stroke={1.75} />
+          Settings
+        </button>
+      </header>
+
       <div className="rs-lobby-shell">
         <section className="rs-lobby-left">
           {panel === "host" ? (
             <>
-              <p className="rs-lobby-eyebrow">You’re about to join {studioName}</p>
+              <p className="rs-lobby-eyebrow">
+                You’re about to join a new recording or podcast
+              </p>
               <h1 className="rs-lobby-title">Let’s check your cam and mic</h1>
 
               <div className="rs-name-row">

@@ -28,14 +28,6 @@ export function resetOnboarding() {
   localStorage.removeItem(ONBOARDING_KEY);
 }
 
-const THEME_SWATCHES: Record<ThemeId, string> = {
-  "night-booth":
-    "linear-gradient(135deg, #070809 25%, #1a1e24 55%, #c4f542 100%)",
-  "signal-dark":
-    "linear-gradient(135deg, #05070c 25%, #141c2a 55%, #5ce1ff 100%)",
-  graphite: "linear-gradient(135deg, #0e0e0e 25%, #1f1f1f 55%, #e8c07a 100%)",
-};
-
 type Step = "welcome" | "name" | "theme" | "devices" | "ready";
 
 const STEPS: Step[] = ["welcome", "name", "theme", "devices", "ready"];
@@ -168,7 +160,7 @@ export default function Onboarding() {
       case "name":
         return "What should\nguests call you?";
       case "theme":
-        return "Set the\nroom tone.";
+        return "Dark or\nlight?";
       case "devices":
         return "Check the\nmic and frame.";
       case "ready":
@@ -183,7 +175,7 @@ export default function Onboarding() {
       case "name":
         return "This shows in the lobby, on tracks, and in captions.";
       case "theme":
-        return "Pick a look for the studio. You can change it anytime in Settings.";
+        return "Dark is Signal Dark by default. You can switch anytime in Settings.";
       case "devices":
         return "We’ll remember these as your defaults. Speak to test the meter.";
       case "ready":
@@ -276,20 +268,17 @@ export default function Onboarding() {
           )}
 
           {step === "theme" && (
-            <div className="onboard-theme-grid">
-              {themes.map((t, i) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  className={`theme-card onboard-theme ${theme === t.id ? "is-active" : ""}`}
-                  style={{ animationDelay: `${0.08 + i * 0.06}s` }}
-                  onClick={() => setTheme(t.id)}
-                >
-                  <div className="theme-swatch" style={{ background: THEME_SWATCHES[t.id] }} />
-                  <strong>{t.label}</strong>
-                  <span>{t.description}</span>
-                </button>
-              ))}
+            <div className="onboard-panel">
+              <Select
+                label="Theme"
+                value={theme}
+                onChange={(v) => setTheme(v as ThemeId)}
+                options={themes.map((t) => ({
+                  value: t.id,
+                  label: t.label,
+                  description: t.description,
+                }))}
+              />
             </div>
           )}
 

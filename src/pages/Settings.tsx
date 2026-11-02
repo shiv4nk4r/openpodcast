@@ -17,14 +17,6 @@ import { useApp } from "../state";
 import { useTheme, type ThemeId } from "../theme";
 import { resetOnboarding } from "./Onboarding";
 
-const THEME_SWATCHES: Record<ThemeId, string> = {
-  "night-booth":
-    "linear-gradient(135deg, #070809 30%, #1a1e24 55%, #c4f542 100%)",
-  "signal-dark":
-    "linear-gradient(135deg, #05070c 30%, #141c2a 55%, #5ce1ff 100%)",
-  graphite: "linear-gradient(135deg, #0e0e0e 30%, #1f1f1f 55%, #e8c07a 100%)",
-};
-
 export default function Settings() {
   const navigate = useNavigate();
   const { settings, refreshSettings } = useApp();
@@ -272,31 +264,24 @@ export default function Settings() {
         <p className="rs-lobby-eyebrow">Preferences</p>
         <h1 className="rs-lobby-title">Settings</h1>
         <p className="rs-rec-sub">
-          Theme the booth, set your name, and choose the devices you record with.
+          Set your name, devices, and whether you prefer dark or light.
         </p>
 
         <section className="rs-settings-card">
           <div className="rs-settings-card-head">
             <h2>Appearance</h2>
-            <p>In-app look — no native system chrome for pickers.</p>
+            <p>Dark uses Signal Dark by default. Switch to light anytime.</p>
           </div>
-          <div className="theme-grid rs-settings-themes">
-            {themes.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                className={`theme-card ${theme === t.id ? "is-active" : ""}`}
-                onClick={() => setTheme(t.id)}
-              >
-                <div
-                  className="theme-swatch"
-                  style={{ background: THEME_SWATCHES[t.id] }}
-                />
-                <strong>{t.label}</strong>
-                <span>{t.description}</span>
-              </button>
-            ))}
-          </div>
+          <Select
+            label="Theme"
+            value={theme}
+            onChange={(v) => setTheme(v as ThemeId)}
+            options={themes.map((t) => ({
+              value: t.id,
+              label: t.label,
+              description: t.description,
+            }))}
+          />
         </section>
 
         <section className="rs-settings-card">
