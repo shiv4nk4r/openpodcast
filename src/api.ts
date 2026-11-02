@@ -158,8 +158,12 @@ export const api = {
         resolution: string;
       }[];
     }>("get_session_timeline", { sessionId }),
-  renderSession: (sessionId: string, layout: string) =>
-    invoke<string>("render_session", { sessionId, layout }),
+  renderSession: (
+    sessionId: string,
+    layout: string,
+    mode: "video" | "audio" = "video",
+  ) =>
+    invoke<string>("render_session", { sessionId, layout, mode }),
   discardSession: (sessionId: string) =>
     invoke<void>("discard_session", { sessionId }),
   /** Permanently delete a saved recording and its local files. */

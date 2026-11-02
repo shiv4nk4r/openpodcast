@@ -1,8 +1,28 @@
 use crate::models::{CaptionCue, Participant, PresenceEvent};
 use crate::whisper::cues_to_srt;
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Instant;
+
+/// Live encode progress pushed to the UI while rendering.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RenderProgress {
+    pub pct: f64,
+    pub out_time_secs: f64,
+    pub duration_secs: f64,
+    pub eta_secs: Option<f64>,
+    pub phase: String,
+}
+
+pub type ProgressCallback<'a> = Option<&'a mut dyn FnMut(RenderProgress)>;
+
+fn emit_progress(cb: &mut ProgressCallback<'_>, progress: RenderProgress) {
+    if let Some(f) = cb.as_mut() {
+        f(progress);
+    }
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct ExportRequest {
@@ -55,7 +75,7 @@ pub fn export_session(
 
     // Prefer a full composed render when ffmpeg is available.
     if which_ffmpeg().is_some() {
-        match render_final_video(session_dir, &req.layout, &export_dir) {
+        match render_final_video(session_dir, &req.layout, &export_dir, &mut None) {
             Ok(master) => {
                 let meta = serde_json::json!({
                     "layout": req.layout,
@@ -163,6 +183,7 @@ pub fn render_final_video(
     session_dir: &Path,
     layout: &str,
     out_dir: &Path,
+    on_progress: &mut ProgressCallback<'_>,
 ) -> Result<PathBuf, String> {
     let ffmpeg = which_ffmpeg().ok_or_else(|| {
         "Bundled ffmpeg was not found. Run `npm run fetch-ffmpeg` (or rebuild the app) so the renderer sidecar is installed."
@@ -228,7 +249,7 @@ pub fn render_final_video(
         }
         args.push("-shortest".into());
         args.push(out.to_string_lossy().into());
-        run_ffmpeg(&ffmpeg, &args)?;
+        run_ffmpeg(&ffmpeg, &args, duration_secs, on_progress)?;
         return Ok(out);
     }
 
@@ -488,7 +509,98 @@ pub fn render_final_video(
     args.push("+faststart".into());
     args.push(out.to_string_lossy().into());
 
-    run_ffmpeg(&ffmpeg, &args)?;
+    run_ffmpeg(&ffmpeg, &args, duration_secs, on_progress)?;
+    Ok(out)
+}
+
+/// Mix participant WAVs into a single stereo AAC podcast (no video).
+pub fn render_final_audio(
+    session_dir: &Path,
+    out_dir: &Path,
+    on_progress: &mut ProgressCallback<'_>,
+) -> Result<PathBuf, String> {
+    let ffmpeg = which_ffmpeg().ok_or_else(|| {
+        "Bundled ffmpeg was not found. Run `npm run fetch-ffmpeg` (or rebuild the app) so the renderer sidecar is installed."
+            .to_string()
+    })?;
+    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+
+    let timeline = load_timeline(session_dir);
+    let duration_secs = timeline.duration_secs.max(0.5);
+    let duration_ms = (duration_secs * 1000.0).round() as u64;
+    let intervals = intervals_from_events(&timeline.presence_events, duration_ms);
+    let tracks = discover_tracks(session_dir, &timeline);
+    if tracks.is_empty() {
+        return Err("No audio tracks found to render".into());
+    }
+
+    let out = out_dir.join("final-audio.m4a");
+    let mut args: Vec<String> = vec!["-y".into()];
+    let mut input_idxs: Vec<(usize, String)> = Vec::new(); // (ffmpeg input index, participant_id)
+
+    for t in &tracks {
+        let path = t
+            .audio
+            .as_ref()
+            .or(t.video.as_ref())
+            .filter(|p| media_has_stream(&ffmpeg, p, StreamKind::Audio));
+        let Some(path) = path else { continue };
+        let idx = input_idxs.len();
+        args.push("-i".into());
+        args.push(path.to_string_lossy().into());
+        input_idxs.push((idx, t.participant_id.clone()));
+    }
+
+    if input_idxs.is_empty() {
+        return Err("No playable audio streams found to render".into());
+    }
+
+    let mut fc: Vec<String> = Vec::new();
+    let mut amix_inputs = Vec::new();
+    for (i, (ain, pid)) in input_idxs.iter().enumerate() {
+        let enable = enable_expr_for(&intervals, pid, duration_ms);
+        let lab = format!("a{i}");
+        fc.push(format!(
+            "[{ain}:a]aresample=48000:ocl=stereo,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=eval=frame:volume='{enable}'[{lab}]",
+            ain = ain,
+            enable = enable,
+            lab = lab
+        ));
+        amix_inputs.push(lab);
+    }
+
+    let mix = if amix_inputs.len() == 1 {
+        format!("[{}]anull,alimiter=limit=0.95[aout]", amix_inputs[0])
+    } else {
+        let inputs = amix_inputs
+            .iter()
+            .map(|l| format!("[{l}]"))
+            .collect::<String>();
+        format!(
+            "{inputs}amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]",
+            inputs = inputs,
+            n = amix_inputs.len()
+        )
+    };
+    fc.push(mix);
+
+    args.push("-filter_complex".into());
+    args.push(fc.join(";"));
+    args.push("-map".into());
+    args.push("[aout]".into());
+    args.push("-t".into());
+    args.push(format!("{duration_secs:.3}"));
+    args.push("-c:a".into());
+    args.push("aac".into());
+    args.push("-b:a".into());
+    args.push("192k".into());
+    args.push("-ac".into());
+    args.push("2".into());
+    args.push("-movflags".into());
+    args.push("+faststart".into());
+    args.push(out.to_string_lossy().into());
+
+    run_ffmpeg(&ffmpeg, &args, duration_secs, on_progress)?;
     Ok(out)
 }
 
@@ -927,14 +1039,137 @@ fn bundled_ffmpeg_candidates() -> Vec<PathBuf> {
     out
 }
 
-fn run_ffmpeg(ffmpeg: &Path, args: &[String]) -> Result<(), String> {
-    let output = Command::new(ffmpeg)
-        .args(args)
-        .output()
+fn parse_ffmpeg_clock(s: &str) -> Option<f64> {
+    // HH:MM:SS.microseconds
+    let parts: Vec<&str> = s.trim().split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let h: f64 = parts[0].parse().ok()?;
+    let m: f64 = parts[1].parse().ok()?;
+    let sec: f64 = parts[2].parse().ok()?;
+    Some(h * 3600.0 + m * 60.0 + sec)
+}
+
+fn run_ffmpeg(
+    ffmpeg: &Path,
+    args: &[String],
+    duration_secs: f64,
+    on_progress: &mut ProgressCallback<'_>,
+) -> Result<(), String> {
+    let mut full_args: Vec<String> = Vec::with_capacity(args.len() + 3);
+    full_args.push("-nostats".into());
+    full_args.push("-progress".into());
+    full_args.push("pipe:1".into());
+    full_args.extend(args.iter().cloned());
+
+    let mut child = Command::new(ffmpeg)
+        .args(&full_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let tail: String = stderr
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "ffmpeg stdout unavailable".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "ffmpeg stderr unavailable".to_string())?;
+
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let mut reader = BufReader::new(stderr);
+        let _ = std::io::Read::read_to_string(&mut reader, &mut buf);
+        buf
+    });
+
+    emit_progress(
+        on_progress,
+        RenderProgress {
+            pct: 0.0,
+            out_time_secs: 0.0,
+            duration_secs,
+            eta_secs: None,
+            phase: "encoding".into(),
+        },
+    );
+
+    let started = Instant::now();
+    let mut out_time_secs = 0.0_f64;
+    let mut speed = 0.0_f64;
+    let reader = BufReader::new(stdout);
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        if let Some(v) = line.strip_prefix("out_time_ms=") {
+            if let Ok(ms) = v.parse::<f64>() {
+                out_time_secs = (ms / 1000.0).max(0.0);
+            }
+        } else if let Some(v) = line.strip_prefix("out_time=") {
+            if let Some(secs) = parse_ffmpeg_clock(v) {
+                out_time_secs = secs.max(0.0);
+            }
+        } else if let Some(v) = line.strip_prefix("speed=") {
+            let cleaned = v.trim().trim_end_matches('x');
+            if let Ok(s) = cleaned.parse::<f64>() {
+                if s.is_finite() && s > 0.0 {
+                    speed = s;
+                }
+            }
+        } else if let Some(state) = line.strip_prefix("progress=") {
+            let remaining = (duration_secs - out_time_secs).max(0.0);
+            let eta_secs = if speed > 0.05 {
+                Some(remaining / speed)
+            } else {
+                let elapsed = started.elapsed().as_secs_f64();
+                if out_time_secs > 0.5 && elapsed > 0.5 {
+                    let rate = out_time_secs / elapsed;
+                    if rate > 0.01 {
+                        Some(remaining / rate)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            let done = state == "end";
+            let pct = if done {
+                100.0
+            } else if duration_secs > 0.0 {
+                (out_time_secs / duration_secs * 100.0).clamp(0.0, 99.5)
+            } else {
+                0.0
+            };
+            emit_progress(
+                on_progress,
+                RenderProgress {
+                    pct,
+                    out_time_secs,
+                    duration_secs,
+                    eta_secs: if done { Some(0.0) } else { eta_secs },
+                    phase: if done {
+                        "done".into()
+                    } else {
+                        "encoding".into()
+                    },
+                },
+            );
+        }
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("ffmpeg wait failed: {e}"))?;
+    let stderr_text = stderr_thread
+        .join()
+        .unwrap_or_else(|_| String::from("(stderr unavailable)"));
+
+    if !status.success() {
+        let tail: String = stderr_text
             .chars()
             .rev()
             .take(1200)
@@ -944,5 +1179,16 @@ fn run_ffmpeg(ffmpeg: &Path, args: &[String]) -> Result<(), String> {
             .collect();
         return Err(format!("ffmpeg failed: {tail}"));
     }
+
+    emit_progress(
+        on_progress,
+        RenderProgress {
+            pct: 100.0,
+            out_time_secs: duration_secs,
+            duration_secs,
+            eta_secs: Some(0.0),
+            phase: "done".into(),
+        },
+    );
     Ok(())
 }

@@ -11,7 +11,10 @@ import {
 } from "@tabler/icons-react";
 import { api } from "../api";
 import { DeleteRecordingDialog } from "../components/DeleteRecordingDialog";
-import { RenderPodcastDialog } from "../components/RenderPodcastDialog";
+import {
+  RenderPodcastDialog,
+  type RenderMode,
+} from "../components/RenderPodcastDialog";
 import {
   intervalsFromEvents,
   isPresentAt,
@@ -91,6 +94,9 @@ export default function Playback() {
   const [offsetsMs, setOffsetsMs] = useState<Record<string, number>>({});
   const [renderOpen, setRenderOpen] = useState(false);
   const [rendering, setRendering] = useState(false);
+  const [renderBusyMode, setRenderBusyMode] = useState<RenderMode | null>(
+    null,
+  );
   const [renderMsg, setRenderMsg] = useState<string | null>(null);
   const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
   const nameInputRef = useRef<HTMLInputElement | null>(null);
@@ -484,12 +490,17 @@ export default function Playback() {
     setRenderOpen(true);
   }
 
-  async function renderFinal() {
+  async function renderFinal(mode: RenderMode) {
     if (!id || rendering) return;
     setRendering(true);
-    setRenderMsg("Rendering final podcast… this can take a minute.");
+    setRenderBusyMode(mode);
+    setRenderMsg(
+      mode === "audio"
+        ? "Mixing audio podcast… this can take a minute."
+        : "Rendering video podcast… this can take a minute.",
+    );
     try {
-      const path = await api.renderSession(id, renderLayout);
+      const path = await api.renderSession(id, renderLayout, mode);
       setRenderMsg(`Saved: ${path}`);
       try {
         await api.revealSessionFolder(id);
@@ -500,6 +511,7 @@ export default function Playback() {
       setRenderMsg(String(e).replace(/^Error:\s*/i, ""));
     } finally {
       setRendering(false);
+      setRenderBusyMode(null);
     }
   }
 
@@ -759,6 +771,7 @@ export default function Playback() {
       open={renderOpen}
       layout={renderLayout}
       busy={rendering}
+      busyMode={renderBusyMode}
       status={renderMsg}
       hasPresence={hasPresence}
       onLayoutChange={setRenderLayout}

@@ -1181,20 +1181,32 @@ fn get_session_timeline(
 
 #[tauri::command]
 fn render_session(
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     session_id: String,
     layout: String,
+    mode: Option<String>,
 ) -> Result<String, String> {
     let session = state
         .db
         .get_session(&session_id)?
         .ok_or_else(|| "Session not found".to_string())?;
     let dir = PathBuf::from(&session.local_path);
+    let mode = mode.unwrap_or_else(|| "video".into());
     let out_dir = dir.join("exports").join(format!(
-        "render-{}",
+        "render-{}-{}",
+        mode,
         chrono::Utc::now().format("%Y%m%d-%H%M%S")
     ));
-    let master = export::render_final_video(&dir, &layout, &out_dir)?;
+    let mut on_progress = |p: export::RenderProgress| {
+        let _ = app.emit("render-progress", &p);
+    };
+    let mut cb: export::ProgressCallback<'_> = Some(&mut on_progress);
+    let master = if mode == "audio" {
+        export::render_final_audio(&dir, &out_dir, &mut cb)?
+    } else {
+        export::render_final_video(&dir, &layout, &out_dir, &mut cb)?
+    };
     Ok(master.to_string_lossy().to_string())
 }
 

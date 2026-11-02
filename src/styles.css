@@ -2081,6 +2081,15 @@ a {
   margin-bottom: 16px;
 }
 
+.render-podcast-section-label {
+  margin: 0 0 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
 .render-podcast-actions {
   display: flex;
   justify-content: flex-end;
@@ -2093,6 +2102,10 @@ a {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.render-podcast-progress {
+  margin-top: 4px;
 }
 
 .bar-btn .icon {
