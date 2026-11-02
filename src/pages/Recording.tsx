@@ -34,9 +34,49 @@ import { LiveCameraPreview } from "../components/LiveCameraPreview";
 import { Select } from "../components/Select";
 import { pickPreferred, useDeviceList } from "../hooks/useDeviceList";
 import { blobToBytes, blobToUint8, useLocalMedia } from "../hooks/useLocalMedia";
-import { useStudioPreview } from "../hooks/useStudioPreview";
+import {
+  useRemotePeerVideo,
+  useStudioPreview,
+} from "../hooks/useStudioPreview";
 import { useApp } from "../state";
 import type { PeerInfo } from "../types";
+
+function RemotePeerTile({
+  peer,
+  waiting,
+  onAdmit,
+}: {
+  peer: {
+    id: string;
+    name: string;
+    admitted: boolean;
+  };
+  waiting: boolean;
+  onAdmit: () => void;
+}) {
+  const { imgRef, hasFrame } = useRemotePeerVideo(peer.id, peer.admitted);
+  return (
+    <div
+      className={`rs-stage-tile${peer.admitted && hasFrame ? "" : " rs-stage-empty"}${waiting ? " is-waiting" : ""}`}
+    >
+      <img
+        ref={imgRef}
+        className="rs-stage-preview rs-remote-preview"
+        alt=""
+        hidden={!hasFrame}
+      />
+      <div className="rs-stage-name">{peer.name}</div>
+      {waiting && (
+        <div className="rs-stage-waiting">
+          <span>Waiting in lobby</span>
+          <button type="button" className="rs-invite-copy" onClick={onAdmit}>
+            Admit
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 type Layout = "auto" | "grid" | "speaker";
 type SideTab = "people" | "layout";
@@ -142,7 +182,7 @@ export default function Recording() {
   const getStream = useCallback(() => media.stream.current, [media.stream]);
 
   const hasAdmittedGuest = peers.some((p) => p.admitted);
-  const { remotes } = useStudioPreview({
+  useStudioPreview({
     active: !!studio,
     role: studio?.role === "guest" ? "guest" : "host",
     hostHasAdmittedGuest: hasAdmittedGuest,
@@ -843,44 +883,20 @@ export default function Recording() {
               </div>
             )}
 
-            {guestTiles.map((p) => {
-              const remote = remotes[p.id];
-              const showRemote =
-                p.admitted && !!remote?.jpeg && Date.now() - remote.updatedAt < 4000;
-              return (
-                <div
-                  className={`rs-stage-tile${p.admitted && showRemote ? "" : " rs-stage-empty"}${p.admitted ? "" : " is-waiting"}`}
-                  key={p.id}
-                >
-                  {showRemote ? (
-                    <img
-                      className="rs-stage-preview rs-remote-preview"
-                      src={`data:image/jpeg;base64,${remote.jpeg}`}
-                      alt=""
-                    />
-                  ) : null}
-                  <div className="rs-stage-name">{p.name}</div>
-                  {!p.admitted && (
-                    <div className="rs-stage-waiting">
-                      <span>Waiting in lobby</span>
-                      <button
-                        type="button"
-                        className="rs-invite-copy"
-                        onClick={() => {
-                          void (async () => {
-                            await api.admitGuest(p.id);
-                            const list = await api.listPeers();
-                            setPeers(list);
-                          })();
-                        }}
-                      >
-                        Admit
-                      </button>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            {guestTiles.map((p) => (
+              <RemotePeerTile
+                key={p.id}
+                peer={p}
+                waiting={!p.admitted}
+                onAdmit={() => {
+                  void (async () => {
+                    await api.admitGuest(p.id);
+                    const list = await api.listPeers();
+                    setPeers(list);
+                  })();
+                }}
+              />
+            ))}
           </div>
 
           {prompterOpen && (

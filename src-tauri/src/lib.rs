@@ -563,17 +563,17 @@ async fn send_preview_frame(
         return Ok(());
     }
 
-    // Guest → host
-    let guest_session = state.guest_conn.lock().take();
-    if let Some(session) = guest_session {
-        let result = session
-            .send_preview(participant_id.clone(), jpeg_b64.clone(), pcm_b64.clone())
-            .await;
-        *state.guest_conn.lock() = Some(session);
-        return result;
+    // Clone the send handle — never `take()` the session (concurrent audio/video
+    // invokes used to drop each other's packets). Drop locks before awaiting.
+    let guest_send = state
+        .guest_conn
+        .lock()
+        .as_ref()
+        .map(|s| s.send_handle());
+    if let Some(send) = guest_send {
+        return p2p::send_preview_on(send, participant_id, jpeg_b64, pcm_b64).await;
     }
 
-    // Host → all guests (clone send handles so we never await under the host lock)
     let targets = state
         .host
         .lock()

@@ -135,23 +135,27 @@ impl Drop for GuestSession {
 }
 
 impl GuestSession {
-    pub async fn send_preview(
-        &self,
-        participant_id: String,
-        jpeg_b64: Option<String>,
-        pcm_b64: Option<String>,
-    ) -> Result<(), String> {
-        let mut send = self.send.lock().await;
-        write_frame(
-            &mut send,
-            &PeerMessage::PreviewFrame {
-                participant_id,
-                jpeg_b64,
-                pcm_b64,
-            },
-        )
-        .await
+    pub fn send_handle(&self) -> GuestSend {
+        self.send.clone()
     }
+}
+
+pub async fn send_preview_on(
+    send: GuestSend,
+    participant_id: String,
+    jpeg_b64: Option<String>,
+    pcm_b64: Option<String>,
+) -> Result<(), String> {
+    let mut guard = send.lock().await;
+    write_frame(
+        &mut guard,
+        &PeerMessage::PreviewFrame {
+            participant_id,
+            jpeg_b64,
+            pcm_b64,
+        },
+    )
+    .await
 }
 
 impl PeerStream {
