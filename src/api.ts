@@ -94,7 +94,8 @@ export const api = {
     invoke<string>("save_video_track", {
       sessionId,
       participantId,
-      data: Array.from(data),
+      // Pass bytes directly — Array.from on multi‑MB video freezes the UI.
+      data: data instanceof Uint8Array ? data : new Uint8Array(data),
       extension,
     }),
   /** Truncate/create the on-disk video file before streaming chunks. */
@@ -118,7 +119,7 @@ export const api = {
     invoke<number>("append_video_chunk", {
       sessionId,
       participantId,
-      data: Array.from(data),
+      data,
       extension,
     }),
   finalizeSession: (

@@ -172,7 +172,14 @@ impl AudioRecorder {
     pub fn stop(mut self) -> PathBuf {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(j) = self.join.take() {
-            let _ = j.join();
+            // cpal stream teardown can stall on some macOS devices — don't
+            // block the whole guest "Saving…" modal forever.
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = j.join();
+                let _ = tx.send(());
+            });
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(8));
         }
         self.path
     }

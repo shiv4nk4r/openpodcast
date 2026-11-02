@@ -3575,6 +3575,52 @@ a {
   position: relative;
 }
 
+.rs-stage-tile.is-cam-off {
+  background: #2a2e36;
+}
+
+.rs-stage-preview-host {
+  position: absolute;
+  inset: 0;
+}
+
+.rs-stage-preview-host[hidden] {
+  display: block !important;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.rs-cam-off {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 20px;
+  text-align: center;
+  background: linear-gradient(165deg, #343a44 0%, #23272f 55%, #1c1f26 100%);
+  color: color-mix(in srgb, #e8eaef 72%, transparent);
+}
+
+.rs-cam-off svg {
+  opacity: 0.78;
+  flex-shrink: 0;
+}
+
+.rs-cam-off-name {
+  font-family: var(--font-display);
+  font-size: clamp(0.95rem, 2.2vw, 1.35rem);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: #e8eaef;
+  max-width: 90%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rs-stage-tile.is-waiting {
   outline: 1px dashed color-mix(in srgb, var(--ink-muted) 55%, transparent);
   outline-offset: -8px;
@@ -4192,12 +4238,38 @@ a {
   height: 12px;
   border-radius: 50%;
   background: #fff;
+  flex-shrink: 0;
 }
 
 .rs-record.is-live .rs-record-dot {
   border-radius: 3px;
   width: 11px;
   height: 11px;
+}
+
+.rs-record-live-label {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.15;
+  gap: 1px;
+}
+
+.rs-record-time {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.72rem;
+  font-weight: 700;
+  opacity: 0.88;
+}
+
+.rs-record-end {
+  font-size: 0.92rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.rs-record.is-live {
+  padding: 10px 16px;
 }
 
 .rs-bar-menu {

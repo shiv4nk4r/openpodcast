@@ -34,7 +34,7 @@ import { LiveCameraPreview } from "../components/LiveCameraPreview";
 import { Select } from "../components/Select";
 import { TransferProgressBar } from "../components/TransferProgressBar";
 import { pickPreferred, useDeviceList } from "../hooks/useDeviceList";
-import { blobToBytes, blobToUint8, useLocalMedia } from "../hooks/useLocalMedia";
+import { blobToUint8, useLocalMedia } from "../hooks/useLocalMedia";
 import {
   useRemotePeerVideo,
   useStudioPreview,
@@ -65,6 +65,15 @@ function StageVuMeter({ level }: { level: number }) {
   );
 }
 
+function CamOffPlaceholder({ name }: { name: string }) {
+  return (
+    <div className="rs-cam-off" aria-label={`${name} camera off`}>
+      <IconCameraOff size={28} stroke={1.5} aria-hidden />
+      <span className="rs-cam-off-name">{name}</span>
+    </div>
+  );
+}
+
 function RemotePeerTile({
   peer,
   waiting,
@@ -80,20 +89,22 @@ function RemotePeerTile({
   admitDisabled?: boolean;
   onAdmit: () => void;
 }) {
-  const { imgRef, hasFrame, level } = useRemotePeerVideo(
+  const { imgRef, hasFrame, camOff, level } = useRemotePeerVideo(
     peer.id,
     peer.admitted,
   );
+  const showCamOff = peer.admitted && !waiting && (!hasFrame || camOff);
   return (
     <div
-      className={`rs-stage-tile${peer.admitted && hasFrame ? "" : " rs-stage-empty"}${waiting ? " is-waiting" : ""}`}
+      className={`rs-stage-tile${peer.admitted && hasFrame && !camOff ? "" : " rs-stage-empty"}${waiting ? " is-waiting" : ""}${showCamOff ? " is-cam-off" : ""}`}
     >
       <img
         ref={imgRef}
         className="rs-stage-preview rs-remote-preview"
         alt=""
-        hidden={!hasFrame}
+        hidden={!hasFrame || camOff}
       />
+      {showCamOff && <CamOffPlaceholder name={peer.name} />}
       <div className="rs-stage-name">{peer.name}</div>
       {peer.admitted && <StageVuMeter level={level} />}
       {waiting && (
@@ -828,16 +839,24 @@ export default function Recording() {
     }
   }
 
-  async function flushLocalTracks() {
+  async function flushLocalTracks(onProgress?: (msg: string) => void) {
+    onProgress?.("Stopping microphone capture…");
     try {
-      await api.stopAudioRecording(active!.participantId);
-    } catch {
-      /* ok */
+      await Promise.race([
+        api.stopAudioRecording(active!.participantId),
+        new Promise<never>((_, rej) =>
+          setTimeout(() => rej(new Error("Audio stop timed out")), 12_000),
+        ),
+      ]);
+    } catch (e) {
+      console.warn("stopAudioRecording", e);
     }
+    onProgress?.("Finalizing camera recording…");
     try {
       const blob = await media.stopRecording();
       if (blob && blob.size > 0) {
-        const bytes = await blobToBytes(blob);
+        onProgress?.("Writing video file…");
+        const bytes = await blobToUint8(blob);
         const ext = blob.type.includes("mp4") ? "mp4" : "webm";
         await api.saveVideoTrack(
           active!.sessionId,
@@ -972,19 +991,35 @@ export default function Recording() {
     }
   }
 
+  /** Cut live cam/mic/share the moment the take ends — HQ file save continues after. */
+  function muteMeetingAV() {
+    setMicOn(false);
+    setCamOn(false);
+    media.toggleTrack("audio", false);
+    media.toggleTrack("video", false);
+    if (sharing) {
+      void stopScreenShare(false);
+    }
+  }
+
   async function stopGuestRecord() {
     if (!active || active.role !== "guest") return;
     recordingRef.current = false;
     setRecording(false);
     clearInterval(timerRef.current);
     const duration = (Date.now() - startedAt.current) / 1000;
+    muteMeetingAV();
     setShowStayModal(true);
     setTransferStatus("saving");
     setTransferMsg("Saving your full-quality recording on this computer…");
     setUploadFrac(0.15);
     try {
-      await flushLocalTracks();
-      setUploadFrac(0.35);
+      await flushLocalTracks((msg) => {
+        setTransferMsg(msg);
+        setUploadFrac((f) => Math.min(0.4, f + 0.08));
+      });
+      setUploadFrac(0.4);
+      setTransferMsg("Saving session metadata…");
       try {
         await api.finalizeSession(
           active.sessionId,
@@ -1003,13 +1038,17 @@ export default function Recording() {
         console.warn("guest finalizeSession", e);
       }
       setHasRecording(true);
-      setUploadFrac(0.45);
-      await refreshSessions();
+      setUploadFrac(0.5);
+      setTransferMsg("Saved locally — sending to host…");
+      await refreshSessions().catch(() => undefined);
       await sendTracksToHost();
     } catch (e) {
       console.error("Guest stop failed", e);
+      setHasRecording(true);
       setTransferStatus("failed");
-      setTransferMsg(`Could not finish saving locally: ${String(e)}`);
+      setTransferMsg(
+        `Could not finish saving locally: ${String(e).replace(/^Error:\s*/i, "")}. You can still try Send to host if files were written.`,
+      );
       setUploadFrac(0.4);
     }
   }
@@ -1025,10 +1064,22 @@ export default function Recording() {
     setRecording(false);
     clearInterval(timerRef.current);
     const duration = (Date.now() - startedAt.current) / 1000;
+
+    // Snapshot thumbnail while the camera is still hot, then cut live A/V.
+    try {
+      const thumb = await media.grabJpegFrame();
+      if (thumb?.length) {
+        await api.saveSessionThumbnail(active.sessionId, thumb);
+      }
+    } catch {
+      /* optional */
+    }
+    muteMeetingAV();
+
     setShowStayModal(true);
     setTransferStatus("saving");
     setTransferMsg(
-      "Saving host tracks, then collecting guest videos. Keep this studio open until guests finish sending.",
+      "Meeting ended. Saving host tracks and collecting guest videos — keep this window open until sends finish.",
     );
     setUploadFrac(0.1);
 
@@ -1040,16 +1091,10 @@ export default function Recording() {
     }
 
     try {
-      const thumb = await media.grabJpegFrame();
-      if (thumb?.length) {
-        await api.saveSessionThumbnail(active.sessionId, thumb);
-      }
-    } catch {
-      /* optional */
-    }
-
-    try {
-      await flushLocalTracks();
+      await flushLocalTracks((msg) => {
+        setTransferMsg(msg);
+        setUploadFrac((f) => Math.min(0.5, f + 0.08));
+      });
     } catch (e) {
       alert(
         `Recording could not finish saving video: ${String(e)}\n\nAudio may still be available.`,
@@ -1255,16 +1300,29 @@ export default function Recording() {
                 : " is-solo"
             }`}
           >
-            <div className="rs-stage-tile">
-              {(videoMode && camOn) || sharing ? (
-                <LiveCameraPreview
-                  className="rs-stage-preview"
-                  setVideoEl={media.setVideoEl}
-                  mirror={!sharing}
-                  maxFps={recording ? 12 : 24}
-                />
-              ) : (
-                <div className="rs-stage-empty">{active.displayName}</div>
+            <div
+              className={`rs-stage-tile${
+                (videoMode && camOn) || sharing
+                  ? ""
+                  : " rs-stage-empty is-cam-off"
+              }`}
+            >
+              {/* Keep preview mounted while cam is off so capture can resume cleanly */}
+              {videoMode || sharing ? (
+                <div
+                  className="rs-stage-preview-host"
+                  hidden={!(camOn || sharing)}
+                >
+                  <LiveCameraPreview
+                    className="rs-stage-preview"
+                    setVideoEl={media.setVideoEl}
+                    mirror={!sharing}
+                    maxFps={recording ? 12 : 24}
+                  />
+                </div>
+              ) : null}
+              {!(videoMode && camOn) && !sharing && (
+                <CamOffPlaceholder name={active.displayName} />
               )}
               <div className="rs-stage-name">
                 {sharing ? "Screen share" : active.displayName}
@@ -1622,10 +1680,22 @@ export default function Recording() {
           <button
             type="button"
             className={`rs-record ${recording ? "is-live" : ""}`}
+            title={
+              recording
+                ? "Stop recording and end the meeting"
+                : "Start recording"
+            }
             onClick={() => (recording ? void stopRecord() : startCountdown())}
           >
             <span className="rs-record-dot" />
-            {recording ? formatTime(elapsed) : "Record"}
+            {recording ? (
+              <span className="rs-record-live-label">
+                <span className="rs-record-time">{formatTime(elapsed)}</span>
+                <span className="rs-record-end">Stop &amp; end meeting</span>
+              </span>
+            ) : (
+              "Record"
+            )}
           </button>
         )}
         <button
@@ -1739,14 +1809,14 @@ export default function Recording() {
                     ? "Saved locally — send still needed"
                     : "Finishing your recording"
                 : transferStatus === "done"
-                  ? "Recording saved"
-                  : "Finishing the take"}
+                  ? "Meeting ended — recording saved"
+                  : "Meeting ended — finishing up"}
             </h3>
             <p style={{ color: "var(--text-muted)" }}>
               {transferMsg ||
                 (active.role === "guest"
-                  ? "Your full-quality video stays on this computer until the host has a copy."
-                  : "Guest high-quality videos arrive here when they finish sending.")}
+                  ? "Camera and mic are off. Your full-quality video stays on this computer until the host has a copy."
+                  : "Camera and mic are off. Guest high-quality videos arrive here when they finish sending.")}
             </p>
             {active.role === "guest" &&
             (transferStatus === "sending" ||

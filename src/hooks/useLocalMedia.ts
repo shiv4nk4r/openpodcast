@@ -259,29 +259,57 @@ export function useLocalMedia(opts: {
   const stopRecording = async (): Promise<Blob | null> => {
     const rec = recorderRef.current;
     if (!rec) {
-      await writeQueueRef.current;
+      await Promise.race([
+        writeQueueRef.current,
+        new Promise<void>((r) => setTimeout(r, 15_000)),
+      ]);
       return null;
     }
     const streamed = streamingRef.current;
-    await new Promise<void>((resolve) => {
-      rec.onstop = () => resolve();
-      try {
-        if (rec.state === "recording") rec.requestData();
-      } catch {
-        /* some engines throw if idle */
-      }
-      rec.stop();
-      recorderRef.current = null;
-    });
-    // Drain any in-flight chunk writes before finalize
-    await writeQueueRef.current;
+    const mimeType = rec.mimeType || "video/webm";
+
+    // Already stopped (common if RecordStop raced) — don't wait on onstop forever.
+    if (rec.state !== "inactive") {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        rec.addEventListener("stop", finish, { once: true });
+        try {
+          if (rec.state === "recording") rec.requestData();
+        } catch {
+          /* some engines throw if idle */
+        }
+        try {
+          rec.stop();
+        } catch {
+          finish();
+        }
+        // WKWebView occasionally never fires `stop` — don't block the save modal.
+        window.setTimeout(finish, 8_000);
+      });
+    }
+    recorderRef.current = null;
+
+    // Drain in-flight chunk writes, but never hang the stay-in-studio modal.
+    await Promise.race([
+      writeQueueRef.current,
+      new Promise<void>((resolve) => {
+        window.setTimeout(() => {
+          console.warn("Video chunk write queue timed out during stop");
+          resolve();
+        }, 45_000);
+      }),
+    ]);
     streamingRef.current = false;
     if (writeErrorRef.current) {
       throw new Error(writeErrorRef.current);
     }
     if (streamed) return null;
-    const type = rec.mimeType || "video/webm";
-    return new Blob(chunksRef.current, { type });
+    return new Blob(chunksRef.current, { type: mimeType });
   };
 
   /** Grab a still JPEG from the live camera for session thumbnails. */

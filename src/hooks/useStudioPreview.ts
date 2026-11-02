@@ -12,6 +12,8 @@ const TARGET_W = 640;
 const TARGET_H = 360;
 const JPEG_QUALITY = 0.72;
 const VIDEO_FPS = 15;
+/** Sentinel jpeg payload — remotes clear the last frame and show cam-off UI. */
+export const CAM_OFF_SENTINEL = "__cam_off__";
 /** Wire format for mic PCM. */
 const PCM_RATE = 16000;
 const AUDIO_FLUSH_MS = 30;
@@ -306,6 +308,19 @@ export function useStudioPreview(opts: {
       if (pcmQueue.length) void pump();
     }, AUDIO_FLUSH_MS);
 
+    // Tell peers immediately when the camera turns off (don't leave a frozen frame).
+    let camOffId = 0;
+    if (!opts.camOn) {
+      const announceOff = () => {
+        if (cancelled) return;
+        latestJpeg = CAM_OFF_SENTINEL;
+        void pump();
+      };
+      announceOff();
+      // Keep announcing so late joiners / dropped packets still clear video.
+      camOffId = window.setInterval(announceOff, 2000);
+    }
+
     const videoId = window.setInterval(() => {
       if (cancelled || !opts.camOn || !ctx2d) return;
       const video = opts.getVideoEl();
@@ -335,6 +350,7 @@ export function useStudioPreview(opts: {
       cancelled = true;
       clearInterval(audioFlushId);
       clearInterval(videoId);
+      if (camOffId) clearInterval(camOffId);
       try {
         processor?.disconnect();
         source?.disconnect();
@@ -381,11 +397,14 @@ export function useRemotePeerVideo(
 ): {
   imgRef: React.RefObject<HTMLImageElement | null>;
   hasFrame: boolean;
+  /** Admitted peer with no live video (camera off or not yet streaming). */
+  camOff: boolean;
   /** 0–1 smoothed mic level from preview PCM. */
   level: number;
 } {
   const imgRef = useRef<HTMLImageElement | null>(null);
   const [hasFrame, setHasFrame] = useState(false);
+  const [camOff, setCamOff] = useState(false);
   const [level, setLevel] = useState(0);
   const staleTimer = useRef(0);
   const levelSmooth = useRef(0);
@@ -395,6 +414,7 @@ export function useRemotePeerVideo(
   useEffect(() => {
     if (!active || !peerId) {
       setHasFrame(false);
+      setCamOff(false);
       setLevel(0);
       levelSmooth.current = 0;
       return;
@@ -413,6 +433,14 @@ export function useRemotePeerVideo(
       }
     };
 
+    const clearVideo = (off: boolean) => {
+      setHasFrame(false);
+      setCamOff(off);
+      const img = imgRef.current;
+      if (img) img.removeAttribute("src");
+      window.clearTimeout(staleTimer.current);
+    };
+
     decayId = window.setInterval(() => {
       if (Date.now() - lastPcmAt.current > 180) {
         levelSmooth.current *= 0.82;
@@ -427,12 +455,21 @@ export function useRemotePeerVideo(
           const p = ev.payload;
           if (!p || p.participant_id !== peerId) return;
 
-          if (p.jpeg_b64) {
-            const img = imgRef.current;
-            if (img) img.src = `data:image/jpeg;base64,${p.jpeg_b64}`;
-            setHasFrame(true);
-            window.clearTimeout(staleTimer.current);
-            staleTimer.current = window.setTimeout(() => setHasFrame(false), 4000);
+          if (p.jpeg_b64 != null) {
+            if (p.jpeg_b64 === CAM_OFF_SENTINEL || p.jpeg_b64 === "") {
+              clearVideo(true);
+            } else {
+              const img = imgRef.current;
+              if (img) img.src = `data:image/jpeg;base64,${p.jpeg_b64}`;
+              setHasFrame(true);
+              setCamOff(false);
+              window.clearTimeout(staleTimer.current);
+              // No frames for a bit → treat as camera off (grey placeholder).
+              staleTimer.current = window.setTimeout(
+                () => clearVideo(true),
+                2500,
+              );
+            }
           }
 
           if (p.pcm_b64) {
@@ -458,5 +495,5 @@ export function useRemotePeerVideo(
     };
   }, [peerId, active]);
 
-  return { imgRef, hasFrame, level };
+  return { imgRef, hasFrame, camOff, level };
 }
