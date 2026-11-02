@@ -78,22 +78,42 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
     if (next) setName(next);
   }, [settings.display_name]);
 
-  async function createHostStudio() {
-    const displayName =
-      settingsRef.current.display_name || "Host";
-    const res = await api.createStudio(DEFAULT_STUDIO_SETTINGS, displayName);
-    const next = {
-      role: "host" as const,
-      sessionId: res.session_id,
-      participantId: "host",
-      invite: res.invite,
-      settings: DEFAULT_STUDIO_SETTINGS,
-      displayName,
-    };
-    setStudio(next);
-    setStudioReady(true);
-    setBootError(null);
-    return next;
+  const hostBootRef = useRef<Promise<{
+    role: "host";
+    sessionId: string;
+    participantId: string;
+    invite: string;
+    settings: typeof DEFAULT_STUDIO_SETTINGS;
+    displayName: string;
+  }> | null>(null);
+
+  async function createHostStudio(displayNameOverride?: string) {
+    if (hostBootRef.current) return hostBootRef.current;
+    const run = (async () => {
+      const displayName =
+        (displayNameOverride ?? name).trim() ||
+        settingsRef.current.display_name?.trim() ||
+        "Host";
+      const res = await api.createStudio(DEFAULT_STUDIO_SETTINGS, displayName);
+      const next = {
+        role: "host" as const,
+        sessionId: res.session_id,
+        participantId: "host",
+        invite: res.invite,
+        settings: DEFAULT_STUDIO_SETTINGS,
+        displayName,
+      };
+      setStudio(next);
+      setStudioReady(true);
+      setBootError(null);
+      return next;
+    })();
+    hostBootRef.current = run;
+    try {
+      return await run;
+    } finally {
+      hostBootRef.current = null;
+    }
   }
 
   // Create host studio in the background — never block the lobby UI on it.
@@ -194,7 +214,9 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
     setStudio(nextStudio);
     try {
       await api.updateStudioSettings(studio.sessionId, settingsNext);
-      const invite = await api.getInvite().catch(() => undefined);
+      const invite = await api
+        .getInvite(nextStudio.displayName)
+        .catch(() => undefined);
       if (invite) setStudio({ ...nextStudio, invite });
     } catch (e) {
       console.warn("Failed to persist studio quality", e);
@@ -221,14 +243,23 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
     setBusy(true);
     setBootError(null);
     try {
-      await persistDevices();
+      const displayName = name.trim() || settings.display_name || "Host";
+      await persistDevices({ displayName });
       let current = studioRef.current;
       if (!current || current.role !== "host") {
-        current = await createHostStudio();
+        current = await createHostStudio(displayName);
+      } else {
+        // Refresh invite + host_name so guests see the typed name.
+        const invite = await api.getInvite(displayName).catch(() => current?.invite);
+        current = {
+          ...current,
+          displayName,
+          invite: invite || current.invite,
+        };
       }
       setStudio({
         ...current,
-        displayName: name.trim() || "Host",
+        displayName,
       });
       navigate("/studio");
     } catch (e) {

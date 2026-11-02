@@ -146,9 +146,11 @@ export default function Recording() {
 
   useEffect(() => {
     if (!studio || studio.role !== "host") return;
-    const id = window.setInterval(async () => {
+    let cancelled = false;
+    const refreshPeers = async () => {
       try {
         const list = await api.listPeers();
+        if (cancelled) return;
         setPeers(list);
         for (const p of list) {
           rosterRef.current.set(p.id, {
@@ -156,11 +158,20 @@ export default function Recording() {
             role: p.role || "Guest",
           });
         }
+        if (list.some((p) => !p.admitted)) {
+          setSideTab("people");
+          setPeopleOpen(true);
+        }
       } catch {
         /* ignore */
       }
-    }, 1500);
-    return () => clearInterval(id);
+    };
+    void refreshPeers();
+    const id = window.setInterval(() => void refreshPeers(), 800);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, [studio]);
 
   useEffect(() => {
@@ -200,6 +211,11 @@ export default function Recording() {
     });
   }
 
+  const waitingPeers = useMemo(
+    () => (studio?.role === "host" ? peers.filter((p) => !p.admitted) : []),
+    [studio, peers],
+  );
+
   const people = useMemo(() => {
     const self = {
       id: studio?.participantId ?? "host",
@@ -220,7 +236,17 @@ export default function Recording() {
         },
       ];
     }
-    return [self, ...peers.filter((p) => p.admitted)];
+    // Host stage includes waiting guests so Admit is visible without hunting.
+    return [
+      self,
+      ...peers.map((p) => ({
+        id: p.id,
+        name: p.name,
+        role: p.admitted ? "Guest" : "Waiting",
+        resolution: studio?.settings.resolution ?? "1080p",
+        admitted: p.admitted,
+      })),
+    ];
   }, [studio, peers]);
 
   useEffect(() => {
@@ -342,8 +368,9 @@ export default function Recording() {
 
   async function copyInvite() {
     try {
-      // Always refresh from the host endpoint so the invite includes a live relay URL.
-      const invite = await api.getInvite();
+      // Always refresh from the host endpoint so the invite includes a live relay URL
+      // and the host's current display name.
+      const invite = await api.getInvite(active.displayName);
       setStudio({ ...active, invite });
       await navigator.clipboard.writeText(invite);
       setInviteCopied(true);
@@ -462,7 +489,9 @@ export default function Recording() {
     setRenamingTitle(true);
     try {
       await api.updateStudioSettings(active.sessionId, settingsNext);
-      const invite = await api.getInvite().catch(() => undefined);
+      const invite = await api
+        .getInvite(nextStudio.displayName)
+        .catch(() => undefined);
       if (invite) setStudio({ ...nextStudio, invite });
     } catch (e) {
       alert(String(e));
@@ -791,8 +820,29 @@ export default function Recording() {
             )}
 
             {guestTiles.map((p) => (
-              <div className="rs-stage-tile rs-stage-empty" key={p.id}>
+              <div
+                className={`rs-stage-tile rs-stage-empty${p.admitted ? "" : " is-waiting"}`}
+                key={p.id}
+              >
                 <div className="rs-stage-name">{p.name}</div>
+                {!p.admitted && (
+                  <div className="rs-stage-waiting">
+                    <span>Waiting in lobby</span>
+                    <button
+                      type="button"
+                      className="rs-invite-copy"
+                      onClick={() => {
+                        void (async () => {
+                          await api.admitGuest(p.id);
+                          const list = await api.listPeers();
+                          setPeers(list);
+                        })();
+                      }}
+                    >
+                      Admit
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -949,10 +999,28 @@ export default function Recording() {
                       <div>
                         <strong>{p.name.replace(" (You)", "")}</strong>
                         <div className="rs-muted">
-                          {p.role} · {active.settings.resolution}
+                          {p.admitted
+                            ? `${p.role} · ${active.settings.resolution}`
+                            : "Waiting in lobby"}
                         </div>
                       </div>
                     </div>
+                    {!p.admitted && active.role === "host" && (
+                      <button
+                        type="button"
+                        className="rs-copy-btn"
+                        style={{ marginTop: 10 }}
+                        onClick={() => {
+                          void (async () => {
+                            await api.admitGuest(p.id);
+                            const list = await api.listPeers();
+                            setPeers(list);
+                          })();
+                        }}
+                      >
+                        Admit
+                      </button>
+                    )}
                     {p.id === active.participantId && (
                       <>
                         <div className="rs-seg-meter" aria-label="Microphone level">
@@ -1011,29 +1079,6 @@ export default function Recording() {
                     )}
                   </div>
                 ))}
-                {active.role === "host" &&
-                  peers
-                    .filter((g) => !g.admitted)
-                    .map((g) => (
-                      <div className="rs-person-card" key={`wait-${g.id}`}>
-                        <strong>{g.name}</strong>
-                        <div className="rs-muted">Waiting in lobby</div>
-                        <button
-                          type="button"
-                          className="rs-copy-btn"
-                          style={{ marginTop: 10 }}
-                          onClick={() => {
-                            void (async () => {
-                              await api.admitGuest(g.id);
-                              const list = await api.listPeers();
-                              setPeers(list);
-                            })();
-                          }}
-                        >
-                          Admit
-                        </button>
-                      </div>
-                    ))}
               </div>
             )}
 
@@ -1071,7 +1116,12 @@ export default function Recording() {
               key={id}
               type="button"
               className={sideTab === id && peopleOpen ? "is-active" : ""}
-              title={label}
+              title={
+                id === "people" && waitingPeers.length
+                  ? `${label} · ${waitingPeers.length} waiting`
+                  : label
+              }
+              style={{ position: "relative" }}
               onClick={() => {
                 if (peopleOpen && sideTab === id) {
                   setPeopleOpen(false);
@@ -1082,6 +1132,9 @@ export default function Recording() {
               }}
             >
               <RailIcon size={20} stroke={1.75} />
+              {id === "people" && waitingPeers.length > 0 && (
+                <span className="rs-rail-badge">{waitingPeers.length}</span>
+              )}
             </button>
           ))}
           <button

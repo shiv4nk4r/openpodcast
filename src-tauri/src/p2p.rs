@@ -48,6 +48,9 @@ pub enum PeerMessage {
     Waiting {
         participant_id: String,
         name: String,
+        /// Host display name (so guests see the real name, not a stale ticket).
+        #[serde(default)]
+        host_name: String,
     },
     PreviewFrame {
         participant_id: String,
@@ -152,6 +155,8 @@ pub struct StudioHost {
     pub peers: Arc<Mutex<HashMap<String, PeerInfo>>>,
     endpoint: Endpoint,
     shutdown: Arc<Mutex<Option<mpsc::Sender<()>>>>,
+    /// Shared with the accept loop so renamed hosts show up for new joiners.
+    live_host_name: Arc<Mutex<String>>,
 }
 
 /// Wait until the endpoint has a relay URL (required for cross-network dials).
@@ -195,7 +200,7 @@ impl StudioHost {
             iroh_ticket,
             password: password.clone(),
             studio,
-            host_name,
+            host_name: host_name.clone(),
             created_at: Utc::now(),
         };
 
@@ -203,6 +208,8 @@ impl StudioHost {
         let (tx, mut rx) = mpsc::channel::<()>(1);
         let peers_c = peers.clone();
         let password_c = password.clone();
+        let host_name_c = Arc::new(Mutex::new(host_name));
+        let host_name_accept = host_name_c.clone();
         let ep_accept = endpoint.clone();
         let ep_keepalive = endpoint.clone();
 
@@ -222,13 +229,26 @@ impl StudioHost {
                         break;
                     }
                     incoming = ep_accept.accept() => {
-                        let Some(connecting) = incoming else { break };
+                        let Some(incoming) = incoming else { break };
                         let peers = peers_c.clone();
                         let password = password_c.clone();
+                        let host_name = host_name_accept.lock().clone();
                         tokio::spawn(async move {
-                            match connecting.await {
+                            // Explicit accept so handshake errors are logged clearly.
+                            let accepting = match incoming.accept() {
+                                Ok(a) => a,
+                                Err(e) => {
+                                    tracing::warn!("guest accept failed: {e}");
+                                    return;
+                                }
+                            };
+                            match accepting.await {
                                 Ok(conn) => {
-                                    let _ = handle_guest(conn, password, peers).await;
+                                    if let Err(e) =
+                                        handle_guest(conn, password, host_name, peers).await
+                                    {
+                                        tracing::warn!("guest session ended: {e}");
+                                    }
                                 }
                                 Err(e) => {
                                     tracing::warn!("guest connection failed: {e}");
@@ -246,6 +266,7 @@ impl StudioHost {
             peers,
             endpoint,
             shutdown: Arc::new(Mutex::new(Some(tx))),
+            live_host_name: host_name_c,
         })
     }
 
@@ -262,6 +283,11 @@ impl StudioHost {
 
     pub fn update_studio_settings(&mut self, settings: StudioSettings) {
         self.ticket.studio = settings;
+    }
+
+    pub fn set_host_name(&mut self, host_name: String) {
+        *self.live_host_name.lock() = host_name.clone();
+        self.ticket.host_name = host_name;
     }
 
     pub fn admit(&self, participant_id: &str) {
@@ -284,6 +310,7 @@ impl StudioHost {
 async fn handle_guest(
     conn: iroh::endpoint::Connection,
     password: String,
+    host_name: String,
     peers: Arc<Mutex<HashMap<String, PeerInfo>>>,
 ) -> Result<(), String> {
     let (mut send, mut recv) = conn
@@ -308,6 +335,7 @@ async fn handle_guest(
                 .await?;
                 return Ok(());
             }
+            tracing::info!(%participant_id, %name, "guest hello — waiting for admit");
             peers.lock().insert(
                 participant_id.clone(),
                 PeerInfo {
@@ -322,6 +350,7 @@ async fn handle_guest(
                 &PeerMessage::Waiting {
                     participant_id: participant_id.clone(),
                     name,
+                    host_name,
                 },
             )
             .await?;
@@ -376,7 +405,7 @@ pub async fn join_studio(
     ticket: &InviteTicket,
     name: String,
     participant_id: String,
-) -> Result<PeerStream, String> {
+) -> Result<(PeerStream, String), String> {
     if ticket.version != 2 || ticket.iroh_ticket.trim().is_empty() {
         return Err(
             "This invite is from an older OpenPodcast build (LAN-only). Both host and guest need the latest app for cross-network studios."
@@ -423,25 +452,34 @@ pub async fn join_studio(
         // Wait until the host registers us (do not drop before this — that raced
         // and left both sides thinking nobody else was in the studio).
         let mut recv = recv;
-        match read_frame(&mut recv).await? {
-            PeerMessage::Waiting { .. } => {}
+        let host_name = match read_frame(&mut recv).await? {
+            PeerMessage::Waiting { host_name, .. } => {
+                if host_name.trim().is_empty() {
+                    ticket.host_name.clone()
+                } else {
+                    host_name
+                }
+            }
             PeerMessage::Deny { reason } => {
                 return Err(reason);
             }
             other => {
                 return Err(format!("Unexpected host response while joining: {other:?}"));
             }
-        }
-        Ok::<_, String>(PeerStream {
-            _endpoint: endpoint.clone(),
-            _conn: conn,
-            send,
-            recv,
-        })
+        };
+        Ok::<_, String>((
+            PeerStream {
+                _endpoint: endpoint.clone(),
+                _conn: conn,
+                send,
+                recv,
+            },
+            host_name,
+        ))
     };
 
     match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
-        Ok(Ok(stream)) => Ok(stream),
+        Ok(Ok(pair)) => Ok(pair),
         Ok(Err(e)) => Err(e),
         Err(_) => Err(
             "Timed out reaching the host. Ask them to Copy invite again while the studio is open, keep both apps online, and allow OpenPodcast through the firewall."
@@ -609,17 +647,33 @@ mod tests {
         assert_eq!(ticket.version, 2);
         assert!(!ticket.iroh_ticket.is_empty());
 
-        let stream = join_studio(&ticket, "Guest".into(), "guest-1".into())
+        let (stream, host_name) = join_studio(&ticket, "Guest".into(), "guest-1".into())
             .await
             .expect("guest join");
+        assert_eq!(host_name, "Host");
         // Give host accept loop a moment to register the peer
         tokio::time::sleep(Duration::from_millis(500)).await;
         let peers = host.peer_list();
         assert!(
-            peers.iter().any(|p| p.id == "guest-1"),
-            "expected guest in peer list: {peers:?}"
+            peers.iter().any(|p| p.id == "guest-1" && !p.admitted),
+            "expected waiting guest in peer list: {peers:?}"
         );
-        drop(stream);
+        let _session = stream.hold_open();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            host.peer_list().iter().any(|p| p.id == "guest-1"),
+            "guest must stay visible while session is held open"
+        );
+        host.admit("guest-1");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            host.peer_list()
+                .iter()
+                .any(|p| p.id == "guest-1" && p.admitted),
+            "expected admitted guest: {:?}",
+            host.peer_list()
+        );
+        drop(_session);
         host.shutdown();
     }
 }

@@ -41,7 +41,8 @@ export const api = {
       peers: PeerInfo[];
       session: SessionRecord;
     }>("create_studio", { settings, hostName }),
-  getInvite: () => invoke<string>("get_invite"),
+  getInvite: (hostName?: string) =>
+    invoke<string>("get_invite", { hostName: hostName ?? null }),
   updateStudioSettings: (sessionId: string, settings: StudioSettings) =>
     invoke<StudioSettings>("update_studio_settings", { sessionId, settings }),
   listPeers: () => invoke<PeerInfo[]>("list_peers"),

@@ -3130,6 +3130,47 @@ a {
   position: relative;
 }
 
+.rs-stage-tile.is-waiting {
+  outline: 1px dashed color-mix(in srgb, var(--ink-muted) 55%, transparent);
+  outline-offset: -8px;
+}
+
+.rs-stage-waiting {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+  color: var(--ink-muted);
+  font-size: 0.9rem;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+}
+
+.rs-stage-waiting .rs-invite-copy {
+  min-width: 120px;
+}
+
+.rs-rail-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--green);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
 .rs-stage-name {
   position: absolute;
   left: 12px;

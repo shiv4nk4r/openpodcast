@@ -363,6 +363,53 @@ async fn create_studio(
     settings: StudioSettings,
     host_name: String,
 ) -> Result<serde_json::Value, String> {
+    let host_name = {
+        let t = host_name.trim();
+        if t.is_empty() {
+            "Host".to_string()
+        } else {
+            t.to_string()
+        }
+    };
+
+    // Reuse an existing host endpoint so React Strict Mode / lobby remounts
+    // don't orphan the dialable endpoint the UI already shared as an invite.
+    let reused = {
+        let mut guard = state.host.lock();
+        if let Some(host) = guard.as_mut() {
+            host.set_host_name(host_name.clone());
+            host.update_studio_settings(settings.clone());
+            let ticket = host.encode_ticket()?;
+            let peers = host.peer_list();
+            Some((ticket, peers))
+        } else {
+            None
+        }
+    };
+    if let Some((ticket, peers)) = reused {
+        let session_id = state
+            .active_session
+            .lock()
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        *state.active_session.lock() = Some(session_id.clone());
+        let sync = serde_json::json!({
+            "session_id": session_id,
+            "studio": settings,
+            "host_name": host_name,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "offsets_ms": {},
+        });
+        let draft = write_draft_sync(&state, &session_id, &sync)?;
+        return Ok(serde_json::json!({
+            "session_id": session_id,
+            "invite": ticket,
+            "peers": peers,
+            "draft_path": draft.to_string_lossy(),
+            "reused": true,
+        }));
+    }
+
     let session_id = Uuid::new_v4().to_string();
     // Lobby-only: keep sync.json in Drafts/ until the host actually records.
     let sync = serde_json::json!({
@@ -387,20 +434,34 @@ async fn create_studio(
         "invite": ticket,
         "peers": peers,
         "draft_path": draft.to_string_lossy(),
+        "reused": false,
     }))
 }
 
 #[tauri::command]
-async fn get_invite(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+async fn get_invite(
+    state: State<'_, Arc<AppState>>,
+    host_name: Option<String>,
+) -> Result<String, String> {
     let (endpoint, mut ticket) = {
-        let guard = state.host.lock();
+        let mut guard = state.host.lock();
         let host = guard
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| "No active studio".to_string())?;
+        if let Some(name) = host_name {
+            let t = name.trim();
+            if !t.is_empty() {
+                host.set_host_name(t.to_string());
+            }
+        }
         (host.endpoint().clone(), host.ticket.clone())
     };
     p2p::wait_until_dialable(&endpoint).await?;
     ticket.iroh_ticket = iroh_tickets::endpoint::EndpointTicket::new(endpoint.addr()).to_string();
+    // Keep the in-memory ticket's dial info fresh for the next copy.
+    if let Some(host) = state.host.lock().as_mut() {
+        host.ticket.iroh_ticket = ticket.iroh_ticket.clone();
+    }
     p2p::encode_ticket(&ticket)
 }
 
@@ -468,14 +529,19 @@ async fn join_studio(
     *state.active_session.lock() = Some(session_id.clone());
 
     // Stay connected so the host sees us in the waiting list and can Admit.
-    let stream = p2p::join_studio(&ticket, display_name.clone(), participant_id.clone()).await?;
+    let (stream, host_name) =
+        p2p::join_studio(&ticket, display_name.clone(), participant_id.clone()).await?;
     *state.guest_conn.lock() = Some(stream.hold_open());
 
     Ok(serde_json::json!({
         "session_id": session_id,
         "participant_id": participant_id,
         "studio": ticket.studio,
-        "host_name": ticket.host_name,
+        "host_name": if host_name.trim().is_empty() {
+            ticket.host_name
+        } else {
+            host_name
+        },
         "connected": true,
         "draft_path": draft.to_string_lossy(),
     }))
@@ -1158,7 +1224,8 @@ async fn return_tracks_to_host(
     session_id: String,
 ) -> Result<Vec<String>, String> {
     let ticket = p2p::decode_ticket(&invite)?;
-    let mut stream = p2p::join_studio(&ticket, participant_id.clone(), participant_id.clone()).await?;
+    let (mut stream, _) =
+        p2p::join_studio(&ticket, participant_id.clone(), participant_id.clone()).await?;
     let dir = resolve_session_dir(&state, &session_id)?;
     let mut sent = Vec::new();
     for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
