@@ -3819,6 +3819,58 @@ a {
   font-weight: 600;
 }
 
+.rs-peer-vol {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+}
+
+.rs-peer-vol-mute {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.rs-peer-vol-mute:hover {
+  background: var(--hover);
+}
+
+.rs-peer-vol-mute.is-muted {
+  color: var(--record);
+}
+
+.rs-peer-vol-slider {
+  flex: 1;
+  min-width: 0;
+  height: 4px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.rs-peer-vol-pct {
+  flex-shrink: 0;
+  min-width: 2.6rem;
+  text-align: right;
+  font-size: 0.75rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-muted);
+}
+
 .rs-vumeter {
   position: absolute;
   right: 12px;
@@ -4053,6 +4105,33 @@ a {
 
 .rs-prompter-scroll::-webkit-scrollbar {
   display: none;
+}
+
+.rs-prompter-mover {
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+}
+
+.rs-prompter-mover.is-scrolling {
+  animation-name: prompter-scroll;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+  animation-duration: var(--prompter-duration, 30s);
+}
+
+@keyframes prompter-scroll {
+  from {
+    transform: translate3d(0, var(--prompter-from, 0px), 0);
+  }
+  to {
+    transform: translate3d(0, calc(-1 * var(--prompter-distance, 0px)), 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rs-prompter-mover.is-scrolling {
+    animation: none;
+  }
 }
 
 .rs-prompter-pad {
@@ -4404,6 +4483,32 @@ a {
 
 .rs-record.is-live {
   padding: 10px 16px;
+}
+
+.rs-record-status {
+  pointer-events: none;
+  cursor: default;
+}
+
+.rs-record-status.is-countdown {
+  background: #1c2430;
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.28);
+}
+
+.rs-record-status.is-countdown .rs-record-dot {
+  border-radius: 50%;
+  background: #ff3b30;
+  animation: pulse-rec 1s ease infinite;
+}
+
+@keyframes pulse-rec {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .rs-bar-menu {

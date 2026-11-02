@@ -122,6 +122,9 @@ export const api = {
       data,
       extension,
     }),
+  /** Flush/close the open video writer after the last chunk. */
+  finishVideoTrack: (sessionId: string, participantId: string) =>
+    invoke<void>("finish_video_track", { sessionId, participantId }),
   finalizeSession: (
     sessionId: string,
     durationSecs: number,
@@ -251,6 +254,9 @@ export const api = {
     invoke<string | null>("get_session_thumbnail", { sessionId }),
   revealSessionFolder: (sessionId: string) =>
     invoke<string>("reveal_session_folder", { sessionId }),
+  /** Host: guests mirror the 5–1 pre-roll countdown. */
+  signalRecordCountdown: (seconds: number) =>
+    invoke<void>("signal_record_countdown", { seconds }),
   /** Host: guests start local HQ recording into the shared take. */
   signalRecordStart: (sessionId: string) =>
     invoke<void>("signal_record_start", { sessionId }),

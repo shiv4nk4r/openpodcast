@@ -8,5 +8,8 @@
 	<string>OpenPodcast needs the microphone to record podcast audio locally.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>OpenPodcast needs the camera for video podcast recording.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>OpenPodcast needs screen recording permission when you share your screen in the studio.</string>
 </dict>
 </plist>
+

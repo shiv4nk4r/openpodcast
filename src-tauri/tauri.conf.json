@@ -49,6 +49,7 @@
     "macOS": {
       "minimumSystemVersion": "10.15",
       "infoPlist": "Info.plist",
+      "entitlements": "Entitlements.plist",
       "signingIdentity": "Developer ID Application: Shivankar Sharma (NH6XX7B9AW)"
     }
   }

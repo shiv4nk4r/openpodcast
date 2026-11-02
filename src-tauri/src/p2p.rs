@@ -67,6 +67,10 @@ pub enum PeerMessage {
     ClockSync {
         host_unix_ms: i64,
     },
+    /// Host started the pre-roll countdown (guests mirror the 5–1 UI).
+    RecordCountdown {
+        seconds: u32,
+    },
     RecordStart {
         session_id: String,
         started_at_ms: i64,
@@ -132,6 +136,9 @@ pub struct RosterEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RecordEvent {
+    Countdown {
+        seconds: u32,
+    },
     Start {
         session_id: String,
         started_at_ms: i64,
@@ -247,6 +254,9 @@ impl PeerStream {
                     }
                     Ok(PeerMessage::PeerList { peers }) => {
                         let _ = roster_tx.send(RosterEvent { peers });
+                    }
+                    Ok(PeerMessage::RecordCountdown { seconds }) => {
+                        let _ = record_tx.send(RecordEvent::Countdown { seconds });
                     }
                     Ok(PeerMessage::RecordStart {
                         session_id,

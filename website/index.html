@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="OpenPodcast — local multi-guest podcast studio. Record on every machine, sync peer-to-peer, export to Premiere."
+    />
+    <title>OpenPodcast — Local podcast studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="icon" href="assets/favicon-32.png" type="image/png" sizes="32x32" />
+    <link rel="icon" href="assets/icon.png" type="image/png" sizes="512x512" />
+    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png" />
+  </head>
+  <body>
+    <header class="top">
+      <a class="brand" href="#top">
+        <img class="brand-mark" src="assets/icon.png" width="28" height="28" alt="" />
+        OpenPodcast
+      </a>
+      <nav>
+        <a href="#features">Features</a>
+        <a href="#how">How it works</a>
+        <a href="#download">Download</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">v0.1 · Desktop for Mac</p>
+          <h1 class="brand-hero">OpenPodcast</h1>
+          <p class="lede">
+            A local multi-guest studio. Everyone records on their own machine,
+            then syncs tracks peer-to-peer — encrypted in transit, no cloud
+            session required.
+          </p>
+          <div class="cta-row">
+            <a class="btn primary" href="#download">Download for Mac</a>
+            <a class="btn ghost" href="#features">See what’s built</a>
+          </div>
+        </div>
+        <div class="hero-stage" aria-hidden="true">
+          <div class="stage-glow"></div>
+          <div class="booth">
+            <div class="booth-bar">
+              <span class="dot live"></span>
+              Studio · 3 online
+            </div>
+            <div class="tiles">
+              <article class="tile host">
+                <span class="tile-label">You · Host</span>
+                <div class="waveform">
+                  <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+                </div>
+              </article>
+              <article class="tile">
+                <span class="tile-label">Maya</span>
+                <div class="waveform dim">
+                  <i></i><i></i><i></i><i></i><i></i><i></i>
+                </div>
+              </article>
+              <article class="tile">
+                <span class="tile-label">Jordan</span>
+                <div class="waveform dim">
+                  <i></i><i></i><i></i><i></i><i></i><i></i>
+                </div>
+              </article>
+              <article class="tile screen">
+                <span class="tile-label">Screen share</span>
+              </article>
+            </div>
+            <div class="booth-footer">
+              <span class="rec"><i></i> REC</span>
+              <span>Encrypted P2P · Local files</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="features" class="section">
+        <h2>What we’ve built</h2>
+        <p class="section-lede">
+          A Riverside-style flow that stays on your machines — from lobby to
+          Premiere timeline.
+        </p>
+        <div class="feature-grid">
+          <article>
+            <h3>Local HQ recording</h3>
+            <p>
+              Host and up to three guests each capture camera and mic locally.
+              No streamed “master” that dies if someone’s Wi‑Fi dips.
+            </p>
+          </article>
+          <article>
+            <h3>Encrypted peer sync</h3>
+            <p>
+              Join with an invite ticket and studio password. Live traffic rides
+              iroh over QUIC — encrypted in transit, direct on LAN or via relay.
+            </p>
+          </article>
+          <article>
+            <h3>Live studio stage</h3>
+            <p>
+              Roster, presence, preview frames, and screen share so the booth
+              feels like you’re in the same room while files stay local.
+            </p>
+          </article>
+          <article>
+            <h3>Editor & layouts</h3>
+            <p>
+              Playback with presence-aware layouts, then compose a final cut or
+              hand off to your NLE.
+            </p>
+          </article>
+          <article>
+            <h3>Premiere XML export</h3>
+            <p>
+              Ship a Final Cut Pro 7 XMEML package so Adobe Premiere can open
+              your multi-track timeline with media linked.
+            </p>
+          </article>
+          <article>
+            <h3>On-device captions</h3>
+            <p>
+              Optional native speech-to-text on macOS and Windows — captions
+              without uploading the episode to a third-party API.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section id="how" class="section how">
+        <h2>How a session runs</h2>
+        <p class="section-lede">Four beats from empty booth to editable tracks.</p>
+        <ol class="steps">
+          <li>
+            <strong>Host a studio</strong>
+            <span>Create a session, set a password, share the invite.</span>
+          </li>
+          <li>
+            <strong>Admit guests</strong>
+            <span>They join, you let them in — max four people total.</span>
+          </li>
+          <li>
+            <strong>Record locally</strong>
+            <span>Everyone rolls on their own disk; you still hear each other live.</span>
+          </li>
+          <li>
+            <strong>Sync & export</strong>
+            <span>Tracks return to the host over P2P. Preview, render, or export XML.</span>
+          </li>
+        </ol>
+      </section>
+
+      <section id="download" class="section download">
+        <h2>Download</h2>
+        <p class="section-lede">
+          Signed and notarized macOS build when available. Drop release files into
+          <code>website/downloads/</code> before you deploy this folder.
+        </p>
+        <div class="download-cards">
+          <a class="dl-card" id="dl-mac" href="downloads/OpenPodcast_0.1.0_aarch64.dmg">
+            <div>
+              <span class="os">macOS</span>
+              <strong>Apple Silicon · DMG</strong>
+              <span class="meta">OpenPodcast 0.1.0 · arm64</span>
+            </div>
+            <span class="dl-arrow">↓</span>
+          </a>
+          <div class="dl-card disabled" aria-disabled="true">
+            <div>
+              <span class="os">Windows</span>
+              <strong>Coming soon</strong>
+              <span class="meta">Installer will land here</span>
+            </div>
+          </div>
+        </div>
+        <p class="fineprint" id="dl-note">
+          After download: open the DMG, drag OpenPodcast to Applications, then
+          launch. Gatekeeper should accept a notarized build; if macOS warns,
+          use System Settings → Privacy &amp; Security.
+        </p>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span>OpenPodcast</span>
+      <span>Local studio · Encrypted sync · Your files</span>
+    </footer>
+
+    <script src="main.js"></script>
+  </body>
+</html>

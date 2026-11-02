@@ -131,6 +131,8 @@ pub struct AppState {
     pub session_dirs: Mutex<HashMap<String, PathBuf>>,
     /// session_id → Drafts/*.json (lobby / never-recorded)
     pub session_drafts: Mutex<HashMap<String, PathBuf>>,
+    /// Open append handles for streaming video tracks (avoids reopen+fsync per chunk).
+    pub video_writers: Mutex<HashMap<String, std::fs::File>>,
     /// Live A/V preview frames from the peer session → UI.
     pub preview_tx: PreviewBus,
     /// Full roster (host + guests) so every client can render everyone.
@@ -155,6 +157,7 @@ impl AppState {
             active_session: Mutex::new(None),
             session_dirs: Mutex::new(HashMap::new()),
             session_drafts: Mutex::new(HashMap::new()),
+            video_writers: Mutex::new(HashMap::new()),
             preview_tx,
             roster_tx,
             record_tx,
@@ -684,6 +687,10 @@ fn video_track_path(
     Ok(dir.join(format!("{participant_id}-video.{ext}")))
 }
 
+fn video_writer_key(session_id: &str, participant_id: &str) -> String {
+    format!("{session_id}::{participant_id}")
+}
+
 #[tauri::command]
 fn save_video_track(
     state: State<'_, Arc<AppState>>,
@@ -692,6 +699,11 @@ fn save_video_track(
     data: Vec<u8>,
     extension: String,
 ) -> Result<String, String> {
+    // Prefer the streaming path if a writer is open — don't clobber mid-take.
+    {
+        let mut writers = state.video_writers.lock();
+        writers.remove(&video_writer_key(&session_id, &participant_id));
+    }
     let path = video_track_path(&state, &session_id, &participant_id, &extension)?;
     std::fs::write(&path, data).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
@@ -705,36 +717,74 @@ fn begin_video_track(
     participant_id: String,
     extension: String,
 ) -> Result<String, String> {
+    use std::io::Write;
     let path = video_track_path(&state, &session_id, &participant_id, &extension)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    let key = video_writer_key(&session_id, &participant_id);
+    let mut writers = state.video_writers.lock();
+    if let Some(mut prev) = writers.insert(key, file) {
+        let _ = prev.flush();
+    }
     Ok(path.to_string_lossy().to_string())
 }
 
 /// Append one MediaRecorder timeslice to disk — keeps RAM flat for hour-long takes.
+/// Runs off the async runtime and skips per-chunk fsync so the UI (teleprompter) stays smooth.
 #[tauri::command]
-fn append_video_chunk(
+async fn append_video_chunk(
     state: State<'_, Arc<AppState>>,
     session_id: String,
     participant_id: String,
     data: Vec<u8>,
     extension: String,
 ) -> Result<u64, String> {
-    use std::io::Write;
     if data.is_empty() {
         return Ok(0);
     }
-    let path = video_track_path(&state, &session_id, &participant_id, &extension)?;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
-    file.write_all(&data).map_err(|e| e.to_string())?;
-    file.flush().map_err(|e| e.to_string())?;
-    Ok(data.len() as u64)
+    let len = data.len() as u64;
+    let key = video_writer_key(&session_id, &participant_id);
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        {
+            let mut writers = state.video_writers.lock();
+            if let Some(file) = writers.get_mut(&key) {
+                file.write_all(&data).map_err(|e| e.to_string())?;
+                return Ok(len);
+            }
+        }
+        // Fallback if begin_video_track wasn't called (or writer was closed).
+        let path = video_track_path(&state, &session_id, &participant_id, &extension)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        file.write_all(&data).map_err(|e| e.to_string())?;
+        // Keep the handle open for subsequent chunks.
+        state.video_writers.lock().insert(key, file);
+        Ok(len)
+    })
+    .await
+    .map_err(|e| format!("append_video_chunk join: {e}"))?
+}
+
+/// Flush and close the streaming video writer after MediaRecorder stops.
+#[tauri::command]
+fn finish_video_track(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    participant_id: String,
+) -> Result<(), String> {
+    use std::io::Write;
+    let key = video_writer_key(&session_id, &participant_id);
+    if let Some(mut file) = state.video_writers.lock().remove(&key) {
+        file.flush().map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1415,6 +1465,27 @@ fn reveal_session_folder(
     Ok(dir.to_string_lossy().to_string())
 }
 
+/// Host: tell guests to show the same pre-roll countdown UI.
+#[tauri::command]
+async fn signal_record_countdown(
+    state: State<'_, Arc<AppState>>,
+    seconds: u32,
+) -> Result<(), String> {
+    let handles = {
+        let host = state.host.lock();
+        let Some(host) = host.as_ref() else {
+            return Err("Not hosting a studio".into());
+        };
+        host.guest_send_handles()
+    };
+    p2p::fanout_message(
+        handles,
+        p2p::PeerMessage::RecordCountdown { seconds },
+    )
+    .await;
+    Ok(())
+}
+
 /// Host: open the session inbox and tell every guest to start local HQ recording.
 #[tauri::command]
 async fn signal_record_start(
@@ -1654,6 +1725,7 @@ pub fn run() {
             save_video_track,
             begin_video_track,
             append_video_chunk,
+            finish_video_track,
             finalize_session,
             discard_session,
             leave_studio,
@@ -1680,6 +1752,7 @@ pub fn run() {
             save_session_thumbnail,
             get_session_thumbnail,
             reveal_session_folder,
+            signal_record_countdown,
             signal_record_start,
             signal_record_stop,
             enqueue_track_return,

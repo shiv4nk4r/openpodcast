@@ -135,7 +135,8 @@ class PcmRing {
 
 /**
  * Live studio preview over a single iroh stream.
- * Audio is flushed first and played through a jitter ring (~120ms).
+ * Audio is flushed first and mixed per-peer through jitter rings (~120ms),
+ * with local-only playback gains (does not affect anyone else's mix).
  */
 export function useStudioPreview(opts: {
   active: boolean;
@@ -146,16 +147,18 @@ export function useStudioPreview(opts: {
   getStream: () => MediaStream | null;
   camOn: boolean;
   micOn: boolean;
+  /** Local listen levels for remote peers (0 = mute, 1 = default, up to 2). */
+  peerVolumes?: Record<string, number>;
 }) {
   const [admitted, setAdmitted] = useState(false);
-  const ringRef = useRef<PcmRing | null>(null);
+  const volumesRef = useRef<Record<string, number>>(opts.peerVolumes ?? {});
+  volumesRef.current = opts.peerVolumes ?? {};
   const sendEnabled =
     opts.role === "host" ? opts.hostHasAdmittedGuest : admitted;
 
   useEffect(() => {
     if (!opts.active) {
       setAdmitted(false);
-      ringRef.current = null;
       return;
     }
 
@@ -163,21 +166,41 @@ export function useStudioPreview(opts: {
     let playCtx: AudioContext | null = null;
     let playProc: ScriptProcessorNode | null = null;
     let playGain: GainNode | null = null;
-    let ring: PcmRing | null = null;
+    const rings = new Map<string, PcmRing>();
+    let mixScratch: Float32Array | null = null;
+    let target = JITTER_TARGET_16K;
+    let capacity = JITTER_MAX_16K;
 
     try {
       playCtx = new AudioContext();
       void playCtx.resume();
       const rate = playCtx.sampleRate || 48000;
-      const target = Math.round(JITTER_TARGET_16K * (rate / PCM_RATE));
-      const capacity = Math.round(JITTER_MAX_16K * (rate / PCM_RATE));
-      ring = new PcmRing(capacity, target);
-      ringRef.current = ring;
+      target = Math.round(JITTER_TARGET_16K * (rate / PCM_RATE));
+      capacity = Math.round(JITTER_MAX_16K * (rate / PCM_RATE));
 
       const bufSize = rate > 40000 ? 2048 : 1024;
       playProc = playCtx.createScriptProcessor(bufSize, 1, 1);
       playProc.onaudioprocess = (e) => {
-        ring?.pull(e.outputBuffer.getChannelData(0));
+        const out = e.outputBuffer.getChannelData(0);
+        out.fill(0);
+        if (!mixScratch || mixScratch.length !== out.length) {
+          mixScratch = new Float32Array(out.length);
+        }
+        const vols = volumesRef.current;
+        for (const [peerId, ring] of rings) {
+          ring.pull(mixScratch);
+          const g = vols[peerId];
+          const gain = g == null ? 1 : Math.max(0, Math.min(2, g));
+          if (gain <= 0.0001) continue;
+          for (let i = 0; i < out.length; i++) {
+            out[i] += mixScratch[i] * gain;
+          }
+        }
+        // Soft clip after summing peers.
+        for (let i = 0; i < out.length; i++) {
+          const s = out[i];
+          out[i] = s < -1 ? -1 : s > 1 ? 1 : s;
+        }
       };
       playGain = playCtx.createGain();
       playGain.gain.value = 1;
@@ -200,7 +223,7 @@ export function useStudioPreview(opts: {
             return;
           }
           if (p.participant_id === opts.participantId) return;
-          if (!p.pcm_b64 || !ring) return;
+          if (!p.pcm_b64 || !playCtx) return;
           const bytes = b64ToBytes(p.pcm_b64);
           if (bytes.byteLength < 2) return;
           const samples = new Int16Array(
@@ -210,6 +233,11 @@ export function useStudioPreview(opts: {
           );
           const f32 = new Float32Array(samples.length);
           for (let i = 0; i < samples.length; i++) f32[i] = samples[i] / 0x8000;
+          let ring = rings.get(p.participant_id);
+          if (!ring) {
+            ring = new PcmRing(capacity, target);
+            rings.set(p.participant_id, ring);
+          }
           ring.push(resampleLinear(f32, PCM_RATE, ctxRate));
         });
       } catch {
@@ -226,7 +254,7 @@ export function useStudioPreview(opts: {
         /* ignore */
       }
       void playCtx?.close().catch(() => undefined);
-      ringRef.current = null;
+      rings.clear();
     };
   }, [opts.active, opts.participantId]);
 

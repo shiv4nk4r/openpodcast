@@ -27,6 +27,7 @@ import {
   IconUserPlus,
   IconUsers,
   IconVolume,
+  IconVolumeOff,
   IconX,
 } from "@tabler/icons-react";
 import { api } from "../api";
@@ -70,6 +71,47 @@ function CamOffPlaceholder({ name }: { name: string }) {
     <div className="rs-cam-off" aria-label={`${name} camera off`}>
       <IconCameraOff size={28} stroke={1.5} aria-hidden />
       <span className="rs-cam-off-name">{name}</span>
+    </div>
+  );
+}
+
+function PeerVolumeControl({
+  name,
+  volume,
+  onChange,
+}: {
+  name: string;
+  volume: number;
+  onChange: (v: number) => void;
+}) {
+  const muted = volume <= 0.001;
+  return (
+    <div className="rs-peer-vol">
+      <button
+        type="button"
+        className={`rs-peer-vol-mute${muted ? " is-muted" : ""}`}
+        title={muted ? `Unmute ${name}` : `Mute ${name} (local only)`}
+        aria-label={muted ? `Unmute ${name}` : `Mute ${name}`}
+        onClick={() => onChange(muted ? 1 : 0)}
+      >
+        {muted ? (
+          <IconVolumeOff size={15} stroke={1.75} />
+        ) : (
+          <IconVolume size={15} stroke={1.75} />
+        )}
+      </button>
+      <input
+        type="range"
+        className="rs-peer-vol-slider"
+        min={0}
+        max={2}
+        step={0.05}
+        value={volume}
+        aria-label={`Volume for ${name} (local only)`}
+        title="Local volume — only on your machine"
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+      <span className="rs-peer-vol-pct">{Math.round(volume * 100)}%</span>
     </div>
   );
 }
@@ -210,6 +252,8 @@ export default function Recording() {
   const [hostRecvActive, setHostRecvActive] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [speakerOpen, setSpeakerOpen] = useState(false);
+  /** Local-only listen levels for remote peers (does not change their recording). */
+  const [peerVolumes, setPeerVolumes] = useState<Record<string, number>>({});
   const [echo, setEcho] = useState(settings.echo_cancellation);
   const [audioDevice, setAudioDevice] = useState(settings.preferred_mic_id ?? "");
   const [videoDevice, setVideoDevice] = useState(settings.preferred_camera_id ?? "");
@@ -233,6 +277,7 @@ export default function Recording() {
   const [prompterDragging, setPrompterDragging] = useState(false);
   const startedAt = useRef<number>(0);
   const timerRef = useRef<number>(0);
+  const countdownTimerRef = useRef<number>(0);
   const recordingRef = useRef(false);
   /** Host session id from RecordStart — used when enqueueing guest track return. */
   const hostSessionIdRef = useRef<string | null>(null);
@@ -275,7 +320,20 @@ export default function Recording() {
     getStream,
     camOn: camOn && !!videoMode,
     micOn,
+    peerVolumes,
   });
+
+  function peerVolume(id: string) {
+    const v = peerVolumes[id];
+    return v == null ? 1 : v;
+  }
+
+  function setPeerVolume(id: string, volume: number) {
+    const next = Math.max(0, Math.min(2, volume));
+    setPeerVolumes((prev) =>
+      prev[id] === next ? prev : { ...prev, [id]: next },
+    );
+  }
 
   useEffect(() => {
     // Only bounce home for unexpected studio loss — leave() navigates itself.
@@ -548,22 +606,59 @@ export default function Recording() {
     }
   }, [prompterScript]);
 
+  // CSS transform scroll (compositor) so disk/IPC jank doesn't stall the teleprompter.
   useEffect(() => {
     if (!prompterOpen || !prompterPlaying || prompterEditing) return;
-    let frame = 0;
-    const tick = () => {
-      const el = prompterScrollRef.current;
-      if (el) {
-        el.scrollTop += 0.35 + prompterSpeed * 0.45;
-        if (el.scrollTop + el.clientHeight >= el.scrollHeight - 2) {
-          setPrompterPlaying(false);
-          return;
+    const viewport = prompterScrollRef.current;
+    const mover = viewport?.querySelector(
+      ".rs-prompter-mover",
+    ) as HTMLElement | null;
+    if (!viewport || !mover) return;
+
+    const startY = viewport.scrollTop;
+    const distance = Math.max(0, mover.scrollHeight - viewport.clientHeight);
+    const remaining = Math.max(0, distance - startY);
+    if (remaining < 4) {
+      setPrompterPlaying(false);
+      return;
+    }
+    viewport.scrollTop = 0;
+    // Match prior rAF feel: ~0.35 + speed*0.45 px per frame at 60fps.
+    const pxPerSec = (0.35 + prompterSpeed * 0.45) * 60;
+    const durationSec = remaining / pxPerSec;
+    mover.style.setProperty("--prompter-from", `${-startY}px`);
+    mover.style.setProperty("--prompter-distance", `${distance}px`);
+    mover.style.setProperty("--prompter-duration", `${durationSec}s`);
+    mover.classList.add("is-scrolling");
+
+    const onEnd = () => setPrompterPlaying(false);
+    mover.addEventListener("animationend", onEnd);
+    return () => {
+      mover.removeEventListener("animationend", onEnd);
+      const style = getComputedStyle(mover);
+      const matrix = style.transform;
+      let y = -startY;
+      if (matrix && matrix !== "none") {
+        const parts = matrix.match(/matrix\((.+)\)/);
+        if (parts) {
+          const nums = parts[1].split(",").map((v) => parseFloat(v.trim()));
+          y = nums[5] ?? y;
+        } else {
+          const t3 = matrix.match(/matrix3d\((.+)\)/);
+          if (t3) {
+            const nums = t3[1].split(",").map((v) => parseFloat(v.trim()));
+            y = nums[13] ?? y;
+          }
         }
       }
-      frame = window.requestAnimationFrame(tick);
+      mover.classList.remove("is-scrolling");
+      mover.style.removeProperty("--prompter-from");
+      mover.style.removeProperty("--prompter-distance");
+      mover.style.removeProperty("--prompter-duration");
+      mover.style.transform = "";
+      // Freeze via scrollTop so pause/resume continues from here.
+      viewport.scrollTop = Math.min(distance, Math.max(0, -y));
     };
-    frame = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(frame);
   }, [prompterOpen, prompterPlaying, prompterEditing, prompterSpeed]);
 
   useEffect(() => {
@@ -772,20 +867,34 @@ export default function Recording() {
     setTitleDraft(active.settings.name);
   }
 
-  function startCountdown() {
-    if (active.role !== "host") return;
-    setCountdown(5);
-    let n = 5;
-    const id = window.setInterval(() => {
+  function runCountdown(seconds: number, onDone?: () => void) {
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = 0;
+    }
+    let n = Math.max(1, Math.floor(seconds));
+    setCountdown(n);
+    countdownTimerRef.current = window.setInterval(() => {
       n -= 1;
       if (n <= 0) {
-        clearInterval(id);
+        clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = 0;
         setCountdown(null);
-        void beginRecord();
+        onDone?.();
       } else {
         setCountdown(n);
       }
     }, 1000);
+  }
+
+  function startCountdown() {
+    if (active.role !== "host") return;
+    void api.signalRecordCountdown(5).catch((e) => {
+      console.error("signalRecordCountdown failed", e);
+    });
+    runCountdown(5, () => {
+      void beginRecord();
+    });
   }
 
   async function beginRecord() {
@@ -835,8 +944,11 @@ export default function Recording() {
         ext,
       );
       media.startRecording({
-        timesliceMs: 2000,
+        // Longer slices = fewer IPC copies on the UI thread (teleprompter stays smooth).
+        timesliceMs: 4000,
         onChunk: async (chunk) => {
+          // Yield so rAF / CSS work can run before we copy a multi‑MB buffer.
+          await new Promise<void>((r) => setTimeout(r, 0));
           const bytes = await blobToUint8(chunk);
           if (!bytes.byteLength) return;
           await api.appendVideoChunk(
@@ -882,9 +994,18 @@ export default function Recording() {
           bytes,
           ext,
         );
+      } else {
+        await api
+          .finishVideoTrack(active!.sessionId, active!.participantId)
+          .catch(() => undefined);
       }
     } catch (e) {
       console.error("Video finalize failed", e);
+      try {
+        await api.finishVideoTrack(active!.sessionId, active!.participantId);
+      } catch {
+        /* ignore */
+      }
       throw e;
     }
   }
@@ -1256,7 +1377,7 @@ export default function Recording() {
     await refreshSessions();
   }
 
-  // Guests start/stop HQ local recording when the host hits Record.
+  // Guests mirror host countdown, then start/stop HQ local recording with the host.
   useEffect(() => {
     if (!studio || studio.role !== "guest") return;
     let unlisten: (() => void) | undefined;
@@ -1266,9 +1387,18 @@ export default function Recording() {
         unlisten = await listen<{
           kind?: string;
           session_id?: string;
+          seconds?: number;
         }>("studio-record", (ev) => {
           const kind = ev.payload?.kind;
-          if (kind === "start" && !recordingRef.current) {
+          if (kind === "countdown" && !recordingRef.current) {
+            const seconds = ev.payload?.seconds ?? 5;
+            runCountdown(seconds);
+          } else if (kind === "start" && !recordingRef.current) {
+            if (countdownTimerRef.current) {
+              clearInterval(countdownTimerRef.current);
+              countdownTimerRef.current = 0;
+            }
+            setCountdown(null);
             if (ev.payload?.session_id) {
               hostSessionIdRef.current = ev.payload.session_id;
             }
@@ -1283,6 +1413,10 @@ export default function Recording() {
     })();
     return () => {
       unlisten?.();
+      if (countdownTimerRef.current) {
+        clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = 0;
+      }
     };
   }, [studio]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1523,12 +1657,14 @@ export default function Recording() {
                   ref={prompterScrollRef}
                   className={`rs-prompter-scroll is-size-${prompterSize}`}
                 >
-                  <div className="rs-prompter-pad" />
-                  <p className="rs-prompter-text">
-                    {prompterScript.trim() ||
-                      "Add a script in Edit, then switch to Read."}
-                  </p>
-                  <div className="rs-prompter-pad" />
+                  <div className="rs-prompter-mover">
+                    <div className="rs-prompter-pad" />
+                    <p className="rs-prompter-text">
+                      {prompterScript.trim() ||
+                        "Add a script in Edit, then switch to Read."}
+                    </p>
+                    <div className="rs-prompter-pad" />
+                  </div>
                 </div>
               )}
 
@@ -1623,6 +1759,13 @@ export default function Recording() {
                         </div>
                       </div>
                     </div>
+                    {p.id !== active.participantId && p.admitted && (
+                      <PeerVolumeControl
+                        name={p.name.replace(" (You)", "")}
+                        volume={peerVolume(p.id)}
+                        onChange={(v) => setPeerVolume(p.id, v)}
+                      />
+                    )}
                     {!p.admitted && active.role === "host" && (
                       <button
                         type="button"
@@ -1789,6 +1932,28 @@ export default function Recording() {
               "Record"
             )}
           </button>
+        )}
+        {active.role === "guest" && (recording || countdown !== null) && (
+          <div
+            className={`rs-record is-live rs-record-status${
+              countdown !== null ? " is-countdown" : ""
+            }`}
+            role="status"
+            aria-live="polite"
+            title={
+              recording ? "Host started recording" : "Recording starting…"
+            }
+          >
+            <span className="rs-record-dot" />
+            <span className="rs-record-live-label">
+              <span className="rs-record-time">
+                {recording ? formatTime(elapsed) : "Get ready"}
+              </span>
+              <span className="rs-record-end">
+                {recording ? "Recording" : "Recording soon"}
+              </span>
+            </span>
+          </div>
         )}
         <button
           type="button"
