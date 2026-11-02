@@ -1,20 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  IconBrandApplePodcast,
   IconCamera,
   IconCameraOff,
-  IconChevronDown,
   IconLayoutGrid,
-  IconMessage,
   IconMicrophone,
   IconMicrophoneOff,
   IconPhoneOff,
-  IconPhoto,
+  IconCopy,
   IconScreenShare,
   IconScript,
   IconSettings,
-  IconTypography,
+  IconUserPlus,
   IconUsers,
   IconVolume,
   IconX,
@@ -27,17 +24,30 @@ import { blobToBytes, useLocalMedia } from "../hooks/useLocalMedia";
 import { useApp } from "../state";
 import type { PeerInfo } from "../types";
 
-const RAIL_ICONS = {
-  people: IconUsers,
-  chat: IconMessage,
-  brand: IconBrandApplePodcast,
-  text: IconTypography,
-  media: IconPhoto,
-  layout: IconLayoutGrid,
-} as const;
+type Layout = "auto" | "grid" | "speaker";
+type SideTab = "people" | "layout";
 
-type Layout = "side" | "grid" | "speaker";
-type SideTab = "people" | "chat" | "brand" | "text" | "media" | "layout";
+const LAYOUT_OPTIONS: {
+  id: Layout;
+  label: string;
+  description: string;
+}[] = [
+  {
+    id: "auto",
+    label: "Auto",
+    description: "Fills the stage based on how many people are here",
+  },
+  {
+    id: "grid",
+    label: "Equal grid",
+    description: "Same-size tiles in a balanced grid",
+  },
+  {
+    id: "speaker",
+    label: "Spotlight",
+    description: "You stay large; others stack beside you",
+  },
+];
 
 export default function Recording() {
   const { studio, settings, setStudio, refreshSessions } = useApp();
@@ -56,12 +66,11 @@ export default function Recording() {
   const [peers, setPeers] = useState<PeerInfo[]>([]);
   const [inviteOpen, setInviteOpen] = useState(true);
   const [inviteCopied, setInviteCopied] = useState(false);
-  const [inviteRole, setInviteRole] = useState("Guest");
   const [sideTab, setSideTab] = useState<SideTab>("people");
   const [peopleOpen, setPeopleOpen] = useState(true);
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
-  const [layout, setLayout] = useState<Layout>("side");
+  const [layout, setLayout] = useState<Layout>("auto");
   const [recording, setRecording] = useState(false);
   const [hasRecording, setHasRecording] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
@@ -74,9 +83,13 @@ export default function Recording() {
   const [audioDevice, setAudioDevice] = useState(settings.preferred_mic_id ?? "");
   const [videoDevice, setVideoDevice] = useState(settings.preferred_camera_id ?? "");
   const [speakerDevice, setSpeakerDevice] = useState(settings.preferred_speaker_id ?? "");
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [renamingTitle, setRenamingTitle] = useState(false);
   const startedAt = useRef<number>(0);
   const timerRef = useRef<number>(0);
   const mediaBooted = useRef(false);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
   /** Everyone who appeared in the lobby / studio during this session */
   const rosterRef = useRef<Map<string, PeerInfo>>(new Map());
 
@@ -163,6 +176,14 @@ export default function Recording() {
     return [self, ...peers.filter((p) => p.admitted)];
   }, [studio, peers]);
 
+  useEffect(() => {
+    if (!editingTitle) return;
+    const el = titleInputRef.current;
+    if (!el) return;
+    el.focus();
+    el.select();
+  }, [editingTitle]);
+
   if (!studio) return null;
   const active = studio;
 
@@ -175,6 +196,41 @@ export default function Recording() {
     } catch (e) {
       alert(String(e));
     }
+  }
+
+  function beginRenameTitle() {
+    if (active.role !== "host" || renamingTitle) return;
+    setTitleDraft(active.settings.name || "Untitled Recording");
+    setEditingTitle(true);
+  }
+
+  async function commitRenameTitle() {
+    if (renamingTitle) return;
+    const next = titleDraft.trim();
+    setEditingTitle(false);
+    if (!next || next === active.settings.name) {
+      setTitleDraft(active.settings.name);
+      return;
+    }
+    const settingsNext = { ...active.settings, name: next };
+    const nextStudio = { ...active, settings: settingsNext };
+    setStudio(nextStudio);
+    setRenamingTitle(true);
+    try {
+      await api.updateStudioSettings(active.sessionId, settingsNext);
+      const invite = await api.getInvite().catch(() => undefined);
+      if (invite) setStudio({ ...nextStudio, invite });
+    } catch (e) {
+      alert(String(e));
+      setStudio(active);
+    } finally {
+      setRenamingTitle(false);
+    }
+  }
+
+  function cancelRenameTitle() {
+    setEditingTitle(false);
+    setTitleDraft(active.settings.name);
   }
 
   function startCountdown() {
@@ -321,6 +377,15 @@ export default function Recording() {
   }
 
   const levelPct = Math.round(media.level * 100);
+  const showInviteTile = active.role === "host" && inviteOpen;
+  const guestTiles = people.slice(1);
+  const tileCount = 1 + (showInviteTile ? 1 : 0) + guestTiles.length;
+  const stageMulti = tileCount > 1;
+  const stageCountClass = stageMulti
+    ? ` is-count-${Math.min(tileCount, 6)}`
+    : "";
+  const stageLayoutClass =
+    stageMulti && layout !== "auto" ? ` is-layout-${layout}` : "";
 
   return (
     <div className="rs-studio">
@@ -328,38 +393,67 @@ export default function Recording() {
         <div className="rs-top-left">
           <strong className="rs-logo">OpenPodcast</strong>
           <span className="rs-sep">/</span>
-          <span>{active.settings.name}</span>
-          <span className="rs-sep">/</span>
-          <span className="rs-muted">Untitled Recording</span>
-        </div>
-        <div className="rs-top-center">
-          <button type="button" className="rs-pill">
-            Live stream — off
-            <IconChevronDown size={14} stroke={2} />
-          </button>
+          {editingTitle ? (
+            <input
+              ref={titleInputRef}
+              className="rs-title-input"
+              value={titleDraft}
+              aria-label="Recording name"
+              disabled={renamingTitle}
+              onChange={(e) => setTitleDraft(e.target.value)}
+              onBlur={() => void commitRenameTitle()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  e.currentTarget.blur();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  cancelRenameTitle();
+                }
+              }}
+            />
+          ) : active.role === "host" ? (
+            <button
+              type="button"
+              className="rs-title-btn"
+              title="Click to rename"
+              onClick={beginRenameTitle}
+            >
+              {active.settings.name || "Untitled Recording"}
+            </button>
+          ) : (
+            <span className="rs-title-readonly">
+              {active.settings.name || "Untitled Recording"}
+            </span>
+          )}
         </div>
         <div className="rs-top-right">
           <button type="button" className="rs-icon-btn" onClick={() => navigate("/settings")}>
             <IconSettings size={18} stroke={1.75} />
           </button>
-          <button
-            type="button"
-            className="rs-invite-btn"
-            onClick={() => {
-              setInviteOpen(true);
-              setPeopleOpen(true);
-              setSideTab("people");
-            }}
-          >
-            Invite
-          </button>
+          {active.role === "host" && (
+            <button
+              type="button"
+              className={`rs-invite-btn${inviteOpen ? " is-active" : ""}`}
+              onClick={() => setInviteOpen((v) => !v)}
+            >
+              <IconUserPlus size={16} stroke={1.75} />
+              Invite
+            </button>
+          )}
           <div className="avatar">{active.displayName.slice(0, 1).toUpperCase()}</div>
         </div>
       </header>
 
       <div className="rs-studio-body">
         <div className="rs-stage-wrap">
-          <div className={`rs-stage ${layout === "grid" ? "is-grid" : ""}`}>
+          <div
+            className={`rs-stage${
+              stageMulti
+                ? ` is-grid${stageCountClass}${stageLayoutClass}`
+                : " is-solo"
+            }`}
+          >
             <div className="rs-stage-tile">
               {videoMode && camOn ? (
                 <LiveCameraPreview
@@ -379,42 +473,44 @@ export default function Recording() {
                 ))}
               </div>
             </div>
-            {people.slice(1).map((p) => (
+
+            {showInviteTile && (
+              <div className="rs-stage-tile rs-invite-tile">
+                <button
+                  type="button"
+                  className="rs-invite-dismiss"
+                  onClick={() => setInviteOpen(false)}
+                  aria-label="Hide invite"
+                >
+                  <IconX size={16} stroke={2} />
+                </button>
+                <div className="rs-invite-tile-inner">
+                  <div className="rs-invite-icon" aria-hidden>
+                    <IconUserPlus size={28} stroke={1.5} />
+                  </div>
+                  <h2>Invite people</h2>
+                  <p>
+                    Share this invite so guests can join your lobby and enter the
+                    studio.
+                  </p>
+                  <button
+                    type="button"
+                    className="rs-invite-copy"
+                    onClick={() => void copyInvite()}
+                  >
+                    <IconCopy size={16} stroke={1.75} />
+                    {inviteCopied ? "Copied" : "Copy invite"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {guestTiles.map((p) => (
               <div className="rs-stage-tile rs-stage-empty" key={p.id}>
                 <div className="rs-stage-name">{p.name}</div>
               </div>
             ))}
           </div>
-
-          {inviteOpen && (
-            <div className="rs-invite-modal">
-              <div className="rs-invite-head">
-                <strong>Invite people</strong>
-                <button type="button" onClick={() => setInviteOpen(false)} aria-label="Close">
-                  <IconX size={16} stroke={2} />
-                </button>
-              </div>
-              <p>Share this invite to bring people into your studio.</p>
-              <div className="rs-invite-row">
-                <input
-                  readOnly
-                  value={active.invite ?? "Generating invite…"}
-                  onFocus={(e) => e.currentTarget.select()}
-                />
-                <Select
-                  value={inviteRole}
-                  onChange={setInviteRole}
-                  options={[
-                    { value: "Guest", label: "Guest" },
-                    { value: "Producer", label: "Producer" },
-                  ]}
-                />
-              </div>
-              <button type="button" className="rs-copy-btn" onClick={() => void copyInvite()}>
-                {inviteCopied ? "Copied" : "Copy invite"}
-              </button>
-            </div>
-          )}
 
           {scriptOpen && (
             <div className="rs-script-float">
@@ -431,141 +527,121 @@ export default function Recording() {
         {peopleOpen && (
           <aside className="rs-people">
             <div className="rs-people-head">
-              <h2>{sideTab === "people" ? "People" : sideTab}</h2>
+              <h2>{sideTab === "people" ? "People" : "Layout"}</h2>
               <button type="button" onClick={() => setPeopleOpen(false)} aria-label="Close">
                 <IconX size={16} stroke={2} />
               </button>
             </div>
 
             {sideTab === "people" && (
-              <>
-                <div className="rs-people-list">
-                  {people.map((p) => (
-                    <div className="rs-person-card" key={p.id}>
-                      <div className="rs-person-top">
-                        <div>
-                          <strong>{p.name.replace(" (You)", "")}</strong>
-                          <div className="rs-muted">
-                            {p.role} · {active.settings.resolution}
-                          </div>
+              <div className="rs-people-list">
+                {people.map((p) => (
+                  <div className="rs-person-card" key={p.id}>
+                    <div className="rs-person-top">
+                      <div>
+                        <strong>{p.name.replace(" (You)", "")}</strong>
+                        <div className="rs-muted">
+                          {p.role} · {active.settings.resolution}
                         </div>
                       </div>
-                      {p.id === active.participantId && (
-                        <>
-                          <div className="rs-seg-meter" aria-label="Microphone level">
-                            {Array.from({ length: 20 }).map((_, i) => (
-                              <i
-                                key={i}
-                                className={levelPct > (i + 1) * 5 ? "is-on" : ""}
-                              />
-                            ))}
-                          </div>
-                          <div className="rs-person-actions">
-                            <button
-                              type="button"
-                              className={!micOn ? "is-off" : ""}
-                              onClick={() => {
-                                const next = !micOn;
-                                setMicOn(next);
-                                media.toggleTrack("audio", next);
-                              }}
-                            >
-                              {micOn ? (
-                                <IconMicrophone size={16} stroke={1.75} />
-                              ) : (
-                                <IconMicrophoneOff size={16} stroke={1.75} />
-                              )}
-                              Mic
-                            </button>
-                            <button
-                              type="button"
-                              className={!camOn ? "is-off" : ""}
-                              onClick={() => {
-                                const next = !camOn;
-                                setCamOn(next);
-                                media.toggleTrack("video", next);
-                              }}
-                            >
-                              {camOn ? (
-                                <IconCamera size={16} stroke={1.75} />
-                              ) : (
-                                <IconCameraOff size={16} stroke={1.75} />
-                              )}
-                              Cam
-                            </button>
-                          </div>
-                          <Select
-                            label="Camera"
-                            icon={<IconCamera size={16} stroke={1.75} />}
-                            value={videoDevice}
-                            onChange={async (id) => {
-                              setVideoDevice(id);
-                              await media.start({
-                                audio: audioDevice || undefined,
-                                video: id,
-                              });
-                              await saveDevicePrefs({ camera: id });
-                            }}
-                            options={deviceList.cameras.map((d) => ({
-                              value: d.deviceId,
-                              label: d.label,
-                            }))}
-                            emptyLabel="No camera found"
-                          />
-                          <Select
-                            label="Microphone"
-                            icon={<IconMicrophone size={16} stroke={1.75} />}
-                            value={audioDevice}
-                            onChange={async (id) => {
-                              setAudioDevice(id);
-                              await media.start({
-                                audio: id,
-                                video: videoMode ? videoDevice || undefined : undefined,
-                              });
-                              await saveDevicePrefs({ mic: id });
-                            }}
-                            options={deviceList.mics.map((d) => ({
-                              value: d.deviceId,
-                              label: d.label,
-                            }))}
-                            emptyLabel="No microphone found"
-                          />
-                          <label className="toggle">
-                            <span>Echo Cancellation</span>
-                            <input
-                              type="checkbox"
-                              checked={echo}
-                              onChange={(e) => setEcho(e.target.checked)}
-                            />
-                          </label>
-                        </>
-                      )}
                     </div>
-                  ))}
-                  {active.role === "host" &&
-                    peers
-                      .filter((g) => !g.admitted)
-                      .map((g) => (
-                        <div className="rs-person-card" key={`wait-${g.id}`}>
-                          <strong>{g.name}</strong>
-                          <div className="rs-muted">Waiting in lobby</div>
-                          <button
-                            type="button"
-                            className="rs-copy-btn"
-                            style={{ marginTop: 10 }}
-                            onClick={() => void api.admitGuest(g.id)}
-                          >
-                            Admit
-                          </button>
+                    {p.id === active.participantId && (
+                      <>
+                        <div className="rs-seg-meter" aria-label="Microphone level">
+                          {Array.from({ length: 20 }).map((_, i) => (
+                            <i
+                              key={i}
+                              className={levelPct > (i + 1) * 5 ? "is-on" : ""}
+                            />
+                          ))}
                         </div>
-                      ))}
-                </div>
-              </>
+                        <Select
+                          label="Camera"
+                          icon={<IconCamera size={16} stroke={1.75} />}
+                          value={videoDevice}
+                          onChange={async (id) => {
+                            setVideoDevice(id);
+                            await media.start({
+                              audio: audioDevice || undefined,
+                              video: id,
+                            });
+                            await saveDevicePrefs({ camera: id });
+                          }}
+                          options={deviceList.cameras.map((d) => ({
+                            value: d.deviceId,
+                            label: d.label,
+                          }))}
+                          emptyLabel="No camera found"
+                        />
+                        <Select
+                          label="Microphone"
+                          icon={<IconMicrophone size={16} stroke={1.75} />}
+                          value={audioDevice}
+                          onChange={async (id) => {
+                            setAudioDevice(id);
+                            await media.start({
+                              audio: id,
+                              video: videoMode ? videoDevice || undefined : undefined,
+                            });
+                            await saveDevicePrefs({ mic: id });
+                          }}
+                          options={deviceList.mics.map((d) => ({
+                            value: d.deviceId,
+                            label: d.label,
+                          }))}
+                          emptyLabel="No microphone found"
+                        />
+                        <label className="toggle">
+                          <span>Echo Cancellation</span>
+                          <input
+                            type="checkbox"
+                            checked={echo}
+                            onChange={(e) => setEcho(e.target.checked)}
+                          />
+                        </label>
+                      </>
+                    )}
+                  </div>
+                ))}
+                {active.role === "host" &&
+                  peers
+                    .filter((g) => !g.admitted)
+                    .map((g) => (
+                      <div className="rs-person-card" key={`wait-${g.id}`}>
+                        <strong>{g.name}</strong>
+                        <div className="rs-muted">Waiting in lobby</div>
+                        <button
+                          type="button"
+                          className="rs-copy-btn"
+                          style={{ marginTop: 10 }}
+                          onClick={() => void api.admitGuest(g.id)}
+                        >
+                          Admit
+                        </button>
+                      </div>
+                    ))}
+              </div>
             )}
-            {sideTab !== "people" && (
-              <p className="rs-muted" style={{ padding: 12 }}>
-                {sideTab} panel — coming soon.
-              </p>
+
+            {sideTab === "layout" && (
+              <div className="rs-layout-panel">
+                <p className="rs-layout-hint">
+                  How the stage arranges when more than one tile is open.
+                </p>
+                <div className="rs-layout-options">
+                  {LAYOUT_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      className={`rs-layout-option${layout === opt.id ? " is-active" : ""}`}
+                      onClick={() => setLayout(opt.id)}
+                    >
+                      <strong>{opt.label}</strong>
+                      <span>{opt.description}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
             )}
           </aside>
         )}
@@ -573,35 +649,27 @@ export default function Recording() {
         <nav className="rs-rail">
           {(
             [
-              ["people", "People"],
-              ["chat", "Chat"],
-              ["brand", "Brand"],
-              ["text", "Text"],
-              ["media", "Media"],
-              ["layout", "Layout"],
+              ["people", "People", IconUsers],
+              ["layout", "Layout", IconLayoutGrid],
             ] as const
-          ).map(([id, label]) => {
-            const RailIcon = RAIL_ICONS[id];
-            return (
-              <button
-                key={id}
-                type="button"
-                className={sideTab === id && peopleOpen ? "is-active" : ""}
-                title={label}
-                onClick={() => {
-                  setSideTab(id);
-                  setPeopleOpen(true);
-                  if (id === "layout") {
-                    setLayout((l) =>
-                      l === "side" ? "grid" : l === "grid" ? "speaker" : "side",
-                    );
-                  }
-                }}
-              >
-                <RailIcon size={20} stroke={1.75} />
-              </button>
-            );
-          })}
+          ).map(([id, label, RailIcon]) => (
+            <button
+              key={id}
+              type="button"
+              className={sideTab === id && peopleOpen ? "is-active" : ""}
+              title={label}
+              onClick={() => {
+                if (peopleOpen && sideTab === id) {
+                  setPeopleOpen(false);
+                  return;
+                }
+                setSideTab(id);
+                setPeopleOpen(true);
+              }}
+            >
+              <RailIcon size={20} stroke={1.75} />
+            </button>
+          ))}
         </nav>
       </div>
 
@@ -661,6 +729,16 @@ export default function Recording() {
           <IconScript size={20} stroke={1.75} />
           Script
         </button>
+        {active.role === "host" && (
+          <button
+            type="button"
+            className={`rs-bar-item${inviteOpen ? " is-active" : ""}`}
+            onClick={() => setInviteOpen((v) => !v)}
+          >
+            <IconUserPlus size={20} stroke={1.75} />
+            Invite
+          </button>
+        )}
         <button type="button" className="rs-bar-item">
           <IconScreenShare size={20} stroke={1.75} />
           Share

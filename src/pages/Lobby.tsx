@@ -7,7 +7,6 @@ import {
   IconHeadphones,
   IconMicrophone,
   IconMicrophoneOff,
-  IconSparkles,
   IconVolume,
   IconWaveSine,
 } from "@tabler/icons-react";
@@ -433,10 +432,6 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
                   </div>
                 )}
               </div>
-              <button type="button" className="rs-effects-btn" title="Effects">
-                <IconSparkles size={14} stroke={2} />
-                Effects
-              </button>
               <div className="rs-preview-controls">
                 <button
                   type="button"
