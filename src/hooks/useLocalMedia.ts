@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { resolutionToSize } from "../lib/studioQuality";
 
+export type RecordSink = {
+  /** Called for each MediaRecorder timeslice — write to disk immediately. */
+  onChunk: (chunk: Blob) => void | Promise<void>;
+  timesliceMs?: number;
+};
+
 export function useLocalMedia(opts: {
   video: boolean;
   audio: boolean;
@@ -14,6 +20,9 @@ export function useLocalMedia(opts: {
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const streamingRef = useRef(false);
+  const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const writeErrorRef = useRef<string | null>(null);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [level, setLevel] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -49,6 +58,7 @@ export function useLocalMedia(opts: {
     source.connect(analyser);
 
     const data = new Float32Array(analyser.fftSize);
+    let lastUi = 0;
     const tick = () => {
       if (ctx.state === "suspended") void ctx.resume();
       analyser.getFloatTimeDomainData(data);
@@ -67,9 +77,15 @@ export function useLocalMedia(opts: {
       const boosted = Math.min(1, Math.pow(raw, 0.65) * 1.35);
       // Attack fast / release slower for a natural VU feel
       const prev = smoothedRef.current;
-      const next = boosted > prev ? prev * 0.35 + boosted * 0.65 : prev * 0.85 + boosted * 0.15;
+      const next =
+        boosted > prev ? prev * 0.35 + boosted * 0.65 : prev * 0.85 + boosted * 0.15;
       smoothedRef.current = next;
-      setLevel(next);
+      // Cap React meter updates ~20fps to reduce render churn while recording
+      const now = performance.now();
+      if (now - lastUi > 50) {
+        lastUi = now;
+        setLevel(next);
+      }
       rafRef.current = requestAnimationFrame(tick);
     };
     tick();
@@ -85,14 +101,20 @@ export function useLocalMedia(opts: {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: opts.audio
             ? {
-                deviceId: deviceIds?.audio ? { exact: deviceIds.audio } : undefined,
+                deviceId: deviceIds?.audio
+                  ? { exact: deviceIds.audio }
+                  : undefined,
                 echoCancellation: opts.echoCancellation ?? true,
-                noiseSuppression: true,
+                // NS ducks speech; AGC lifts quiet mics into a usable range
+                noiseSuppression: false,
+                autoGainControl: true,
               }
             : false,
           video: opts.video
             ? {
-                deviceId: deviceIds?.video ? { exact: deviceIds.video } : undefined,
+                deviceId: deviceIds?.video
+                  ? { exact: deviceIds.video }
+                  : undefined,
                 width: { ideal: size.width },
                 height: { ideal: size.height },
                 frameRate: { ideal: fps },
@@ -160,41 +182,76 @@ export function useLocalMedia(opts: {
     });
   };
 
-  const startRecording = (mimeHint?: string) => {
+  const enqueueWrite = (task: () => Promise<void>) => {
+    writeQueueRef.current = writeQueueRef.current
+      .then(task)
+      .catch((e) => {
+        writeErrorRef.current = String(e);
+        console.error("Video chunk write failed", e);
+      });
+    return writeQueueRef.current;
+  };
+
+  const startRecording = (sink?: RecordSink) => {
     const stream = streamRef.current;
     if (!stream) throw new Error("No media stream");
     chunksRef.current = [];
+    writeErrorRef.current = null;
+    writeQueueRef.current = Promise.resolve();
+    streamingRef.current = !!sink?.onChunk;
     // Prefer MP4 for WKWebView/macOS playback in the editor; WebM as fallback.
-    const mime =
-      mimeHint ||
-      (MediaRecorder.isTypeSupported("video/mp4;codecs=avc1,mp4a.40.2")
-        ? "video/mp4;codecs=avc1,mp4a.40.2"
-        : MediaRecorder.isTypeSupported("video/mp4")
-          ? "video/mp4"
-          : MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")
-            ? "video/webm;codecs=vp9,opus"
-            : MediaRecorder.isTypeSupported("video/webm")
-              ? "video/webm"
-              : "");
+    const mime = MediaRecorder.isTypeSupported("video/mp4;codecs=avc1,mp4a.40.2")
+      ? "video/mp4;codecs=avc1,mp4a.40.2"
+      : MediaRecorder.isTypeSupported("video/mp4")
+        ? "video/mp4"
+        : MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")
+          ? "video/webm;codecs=vp9,opus"
+          : MediaRecorder.isTypeSupported("video/webm")
+            ? "video/webm"
+            : "";
     const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
     rec.ondataavailable = (e) => {
-      if (e.data.size) chunksRef.current.push(e.data);
+      if (!e.data.size) return;
+      if (streamingRef.current && sink?.onChunk) {
+        const chunk = e.data;
+        enqueueWrite(async () => {
+          await sink.onChunk(chunk);
+        });
+      } else {
+        chunksRef.current.push(e.data);
+      }
     };
-    rec.start(1000);
+    // 2s slices: fewer IPC writes, still bounded RAM if a write stalls briefly
+    rec.start(sink?.timesliceMs ?? 2000);
     recorderRef.current = rec;
   };
 
   const stopRecording = async (): Promise<Blob | null> => {
     const rec = recorderRef.current;
-    if (!rec) return null;
-    return new Promise((resolve) => {
-      rec.onstop = () => {
-        const type = rec.mimeType || "video/webm";
-        resolve(new Blob(chunksRef.current, { type }));
-      };
+    if (!rec) {
+      await writeQueueRef.current;
+      return null;
+    }
+    const streamed = streamingRef.current;
+    await new Promise<void>((resolve) => {
+      rec.onstop = () => resolve();
+      try {
+        if (rec.state === "recording") rec.requestData();
+      } catch {
+        /* some engines throw if idle */
+      }
       rec.stop();
       recorderRef.current = null;
     });
+    // Drain any in-flight chunk writes before finalize
+    await writeQueueRef.current;
+    streamingRef.current = false;
+    if (writeErrorRef.current) {
+      throw new Error(writeErrorRef.current);
+    }
+    if (streamed) return null;
+    const type = rec.mimeType || "video/webm";
+    return new Blob(chunksRef.current, { type });
   };
 
   /** Grab a still JPEG from the live camera for session thumbnails. */
@@ -228,10 +285,21 @@ export function useLocalMedia(opts: {
     stopRecording,
     grabJpegFrame,
     stream: streamRef,
+    /** Active recorder mime — useful to pick file extension before start. */
+    pickRecorderExtension: () => {
+      if (MediaRecorder.isTypeSupported("video/mp4;codecs=avc1,mp4a.40.2"))
+        return "mp4";
+      if (MediaRecorder.isTypeSupported("video/mp4")) return "mp4";
+      return "webm";
+    },
   };
 }
 
 export async function blobToBytes(blob: Blob): Promise<number[]> {
   const buf = await blob.arrayBuffer();
   return Array.from(new Uint8Array(buf));
+}
+
+export async function blobToUint8(blob: Blob): Promise<Uint8Array> {
+  return new Uint8Array(await blob.arrayBuffer());
 }

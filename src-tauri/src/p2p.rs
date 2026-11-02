@@ -112,12 +112,8 @@ impl StudioHost {
             .map(char::from)
             .collect();
 
+        // Local interfaces only at start — never block lobby boot on WAN IP lookup.
         let mut addrs = local_ipv4s();
-        if let Ok(public) = discover_public_ip().await {
-            if !addrs.contains(&public) {
-                addrs.push(public);
-            }
-        }
         if addrs.is_empty() {
             addrs.push("127.0.0.1".into());
         }
@@ -364,6 +360,7 @@ fn local_ip_fallback() -> Result<Vec<String>, String> {
     Ok(vec![addr.ip().to_string()])
 }
 
+#[allow(dead_code)]
 async fn discover_public_ip() -> Result<String, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))

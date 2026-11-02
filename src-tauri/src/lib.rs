@@ -25,6 +25,10 @@ pub struct AppState {
     pub host: Mutex<Option<StudioHost>>,
     pub recorders: Mutex<HashMap<String, AudioRecorder>>,
     pub active_session: Mutex<Option<String>>,
+    /// session_id → Recordings/... folder (created when Record starts)
+    pub session_dirs: Mutex<HashMap<String, PathBuf>>,
+    /// session_id → Drafts/*.json (lobby / never-recorded)
+    pub session_drafts: Mutex<HashMap<String, PathBuf>>,
 }
 
 impl AppState {
@@ -34,8 +38,149 @@ impl AppState {
             host: Mutex::new(None),
             recorders: Mutex::new(HashMap::new()),
             active_session: Mutex::new(None),
+            session_dirs: Mutex::new(HashMap::new()),
+            session_drafts: Mutex::new(HashMap::new()),
         })
     }
+}
+
+fn read_sync_title(sync: &serde_json::Value) -> String {
+    sync.get("studio")
+        .and_then(|s| s.get("name"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Untitled Recording")
+        .to_string()
+}
+
+fn write_draft_sync(state: &AppState, session_id: &str, sync: &serde_json::Value) -> Result<PathBuf, String> {
+    // Resolve path with the map lock released before any second lock / FS work.
+    // (if-let temporaries hold MutexGuard for the whole if/else — that deadlocks.)
+    let cached = state.session_drafts.lock().get(session_id).cloned();
+    let path = if let Some(existing) = cached {
+        existing
+    } else if let Some(existing) = paths::find_draft_file(session_id) {
+        state
+            .session_drafts
+            .lock()
+            .insert(session_id.to_string(), existing.clone());
+        existing
+    } else {
+        let path = paths::drafts_dir()?.join(paths::structured_draft_filename(session_id));
+        state
+            .session_drafts
+            .lock()
+            .insert(session_id.to_string(), path.clone());
+        path
+    };
+    std::fs::write(&path, serde_json::to_string_pretty(sync).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+fn resolve_session_dir(state: &AppState, session_id: &str) -> Result<PathBuf, String> {
+    if let Some(p) = state.session_dirs.lock().get(session_id).cloned() {
+        return Ok(p);
+    }
+    if let Ok(Some(rec)) = state.db.get_session(session_id) {
+        let p = PathBuf::from(&rec.local_path);
+        if p.is_dir() {
+            state
+                .session_dirs
+                .lock()
+                .insert(session_id.to_string(), p.clone());
+            return Ok(p);
+        }
+    }
+    if let Some(p) = paths::find_recording_dir(session_id) {
+        state
+            .session_dirs
+            .lock()
+            .insert(session_id.to_string(), p.clone());
+        return Ok(p);
+    }
+    Err(format!("Recording folder not found for session {session_id}"))
+}
+
+/// Promote a lobby draft into `Recordings/<structured-name>/` the first time we record.
+fn ensure_recording_dir(state: &AppState, session_id: &str) -> Result<PathBuf, String> {
+    if let Ok(existing) = resolve_session_dir(state, session_id) {
+        return Ok(existing);
+    }
+
+    let mut sync = serde_json::json!({ "session_id": session_id });
+    let draft_path = state
+        .session_drafts
+        .lock()
+        .get(session_id)
+        .cloned()
+        .or_else(|| paths::find_draft_file(session_id));
+
+    if let Some(ref draft) = draft_path {
+        if let Ok(raw) = std::fs::read_to_string(draft) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                sync = v;
+            }
+        }
+    }
+    sync["session_id"] = serde_json::json!(session_id);
+
+    let title = read_sync_title(&sync);
+    let folder = paths::structured_recording_name(&title, session_id);
+    let dir = paths::recordings_dir()?.join(folder);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let sync_path = dir.join("sync.json");
+    std::fs::write(
+        &sync_path,
+        serde_json::to_string_pretty(&sync).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+
+    if let Some(draft) = draft_path {
+        let _ = std::fs::remove_file(&draft);
+        state.session_drafts.lock().remove(session_id);
+    }
+
+    state
+        .session_dirs
+        .lock()
+        .insert(session_id.to_string(), dir.clone());
+    Ok(dir)
+}
+
+fn update_session_sync(state: &AppState, session_id: &str, mutate: impl FnOnce(&mut serde_json::Value)) -> Result<(), String> {
+    if let Ok(dir) = resolve_session_dir(state, session_id) {
+        let sync_path = dir.join("sync.json");
+        let mut sync: serde_json::Value = if sync_path.exists() {
+            serde_json::from_str(&std::fs::read_to_string(&sync_path).unwrap_or_default())
+                .unwrap_or(serde_json::json!({ "session_id": session_id }))
+        } else {
+            serde_json::json!({ "session_id": session_id })
+        };
+        mutate(&mut sync);
+        std::fs::write(
+            &sync_path,
+            serde_json::to_string_pretty(&sync).unwrap_or_default(),
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let draft = state
+        .session_drafts
+        .lock()
+        .get(session_id)
+        .cloned()
+        .or_else(|| paths::find_draft_file(session_id));
+    let mut sync: serde_json::Value = if let Some(ref path) = draft {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_default())
+            .unwrap_or(serde_json::json!({ "session_id": session_id }))
+    } else {
+        serde_json::json!({ "session_id": session_id })
+    };
+    mutate(&mut sync);
+    write_draft_sync(state, session_id, &sync)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -68,7 +213,9 @@ fn set_ai_provider(base_url: String, api_key: String) -> Result<AppSettings, Str
 fn get_app_paths() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "data": paths::app_data_dir()?.to_string_lossy(),
-        "sessions": paths::sessions_dir()?.to_string_lossy(),
+        "sessions": paths::recordings_dir()?.to_string_lossy(),
+        "recordings": paths::recordings_dir()?.to_string_lossy(),
+        "drafts": paths::drafts_dir()?.to_string_lossy(),
         "models": paths::models_dir()?.to_string_lossy(),
     }))
 }
@@ -115,7 +262,7 @@ async fn create_studio(
     host_name: String,
 ) -> Result<serde_json::Value, String> {
     let session_id = Uuid::new_v4().to_string();
-    let dir = paths::session_dir(&session_id)?;
+    // Lobby-only: keep sync.json in Drafts/ until the host actually records.
     let sync = serde_json::json!({
         "session_id": session_id,
         "studio": settings,
@@ -123,8 +270,7 @@ async fn create_studio(
         "created_at": chrono::Utc::now().to_rfc3339(),
         "offsets_ms": {},
     });
-    std::fs::write(dir.join("sync.json"), serde_json::to_string_pretty(&sync).unwrap())
-        .map_err(|e| e.to_string())?;
+    let draft = write_draft_sync(&state, &session_id, &sync)?;
 
     let host = StudioHost::start(settings.clone(), host_name.clone()).await?;
     let ticket = host.encode_ticket()?;
@@ -138,6 +284,7 @@ async fn create_studio(
         "session_id": session_id,
         "invite": ticket,
         "peers": peers,
+        "draft_path": draft.to_string_lossy(),
     }))
 }
 
@@ -161,18 +308,10 @@ fn update_studio_settings(
         host.update_studio_settings(settings.clone());
     }
 
-    let dir = paths::session_dir(&session_id)?;
-    let sync_path = dir.join("sync.json");
-    if sync_path.exists() {
-        let raw = std::fs::read_to_string(&sync_path).unwrap_or_default();
-        if let Ok(mut sync) = serde_json::from_str::<serde_json::Value>(&raw) {
-            sync["studio"] = serde_json::to_value(&settings).unwrap_or_default();
-            let _ = std::fs::write(
-                &sync_path,
-                serde_json::to_string_pretty(&sync).unwrap_or(raw),
-            );
-        }
-    }
+    let settings_value = serde_json::to_value(&settings).unwrap_or_default();
+    update_session_sync(&state, &session_id, |sync| {
+        sync["studio"] = settings_value;
+    })?;
 
     Ok(settings)
 }
@@ -205,13 +344,13 @@ fn decode_invite(invite: String) -> Result<InviteTicket, String> {
 
 #[tauri::command]
 async fn join_studio(
+    state: State<'_, Arc<AppState>>,
     invite: String,
     display_name: String,
 ) -> Result<serde_json::Value, String> {
     let ticket = p2p::decode_ticket(&invite)?;
     let participant_id = Uuid::new_v4().to_string();
     let session_id = Uuid::new_v4().to_string();
-    let dir = paths::session_dir(&session_id)?;
     let sync = serde_json::json!({
         "session_id": session_id,
         "studio": ticket.studio,
@@ -219,8 +358,8 @@ async fn join_studio(
         "participant_id": participant_id,
         "joined_at": chrono::Utc::now().to_rfc3339(),
     });
-    std::fs::write(dir.join("sync.json"), serde_json::to_string_pretty(&sync).unwrap())
-        .map_err(|e| e.to_string())?;
+    let draft = write_draft_sync(&state, &session_id, &sync)?;
+    *state.active_session.lock() = Some(session_id.clone());
 
     // Attempt connection (may fail if host unreachable — still return ticket info for UI)
     let connected = p2p::join_studio(&ticket, display_name.clone(), participant_id.clone())
@@ -233,7 +372,7 @@ async fn join_studio(
         "studio": ticket.studio,
         "host_name": ticket.host_name,
         "connected": connected,
-        "local_path": dir.to_string_lossy(),
+        "draft_path": draft.to_string_lossy(),
     }))
 }
 
@@ -249,7 +388,7 @@ fn start_audio_recording(
     participant_id: String,
     device_name: Option<String>,
 ) -> Result<String, String> {
-    let dir = paths::session_dir(&session_id)?;
+    let dir = ensure_recording_dir(&state, &session_id)?;
     let path = dir.join(format!("{participant_id}-audio.wav"));
     let recorder = AudioRecorder::start(path.clone(), device_name)?;
     state
@@ -283,17 +422,72 @@ fn stop_audio_recording(
     Ok(path.to_string_lossy().to_string())
 }
 
+fn video_track_path(
+    state: &AppState,
+    session_id: &str,
+    participant_id: &str,
+    extension: &str,
+) -> Result<PathBuf, String> {
+    let dir = ensure_recording_dir(state, session_id)?;
+    let ext = if extension.trim().is_empty() {
+        "webm"
+    } else {
+        extension.trim().trim_start_matches('.')
+    };
+    Ok(dir.join(format!("{participant_id}-video.{ext}")))
+}
+
 #[tauri::command]
 fn save_video_track(
+    state: State<'_, Arc<AppState>>,
     session_id: String,
     participant_id: String,
     data: Vec<u8>,
     extension: String,
 ) -> Result<String, String> {
-    let dir = paths::session_dir(&session_id)?;
-    let path = dir.join(format!("{participant_id}-video.{extension}"));
+    let path = video_track_path(&state, &session_id, &participant_id, &extension)?;
     std::fs::write(&path, data).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
+}
+
+/// Create/truncate the video file before streaming chunks (long sessions).
+#[tauri::command]
+fn begin_video_track(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    participant_id: String,
+    extension: String,
+) -> Result<String, String> {
+    let path = video_track_path(&state, &session_id, &participant_id, &extension)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Append one MediaRecorder timeslice to disk — keeps RAM flat for hour-long takes.
+#[tauri::command]
+fn append_video_chunk(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    participant_id: String,
+    data: Vec<u8>,
+    extension: String,
+) -> Result<u64, String> {
+    use std::io::Write;
+    if data.is_empty() {
+        return Ok(0);
+    }
+    let path = video_track_path(&state, &session_id, &participant_id, &extension)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    file.write_all(&data).map_err(|e| e.to_string())?;
+    file.flush().map_err(|e| e.to_string())?;
+    Ok(data.len() as u64)
 }
 
 #[tauri::command]
@@ -308,25 +502,15 @@ fn rename_session(
     }
     state.db.rename_session(&session_id, trimmed)?;
 
-    // Keep sync.json studio name in sync when present
-    let sync_path = paths::session_dir(&session_id)?.join("sync.json");
-    if sync_path.exists() {
-        if let Ok(raw) = std::fs::read_to_string(&sync_path) {
-            if let Ok(mut sync) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if sync.get("studio").is_none() {
-                    sync["studio"] = serde_json::json!({});
-                }
-                if let Some(studio) = sync.get_mut("studio") {
-                    studio["name"] = serde_json::json!(trimmed);
-                }
-                sync["name"] = serde_json::json!(trimmed);
-                let _ = std::fs::write(
-                    &sync_path,
-                    serde_json::to_string_pretty(&sync).unwrap_or(raw),
-                );
-            }
+    let _ = update_session_sync(&state, &session_id, |sync| {
+        if sync.get("studio").is_none() {
+            sync["studio"] = serde_json::json!({});
         }
-    }
+        if let Some(studio) = sync.get_mut("studio") {
+            studio["name"] = serde_json::json!(trimmed);
+        }
+        sync["name"] = serde_json::json!(trimmed);
+    });
 
     state
         .db
@@ -342,7 +526,7 @@ fn finalize_session(
     participants: Vec<Participant>,
     pad_offsets_ms: HashMap<String, u64>,
 ) -> Result<SessionRecord, String> {
-    let dir = paths::session_dir(&session_id)?;
+    let dir = ensure_recording_dir(&state, &session_id)?;
     for (pid, pad) in &pad_offsets_ms {
         let wav = dir.join(format!("{pid}-audio.wav"));
         if wav.exists() && *pad > 0 {
@@ -357,6 +541,7 @@ fn finalize_session(
     } else {
         serde_json::json!({})
     };
+    sync["session_id"] = serde_json::json!(session_id);
     sync["duration_secs"] = serde_json::json!(duration_secs);
     sync["offsets_ms"] = serde_json::to_value(&pad_offsets_ms).unwrap_or_default();
     sync["participants"] = serde_json::to_value(&participants).unwrap_or_default();
@@ -455,12 +640,27 @@ fn discard_session(
     session_id: String,
 ) -> Result<(), String> {
     let _ = state.db.delete_session(&session_id);
-    if let Ok(root) = paths::sessions_dir() {
-        let dir = root.join(&session_id);
-        if dir.exists() {
-            let _ = std::fs::remove_dir_all(&dir);
+
+    if let Some(dir) = state.session_dirs.lock().remove(&session_id) {
+        let _ = std::fs::remove_dir_all(dir);
+    } else if let Some(dir) = paths::find_recording_dir(&session_id) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    if let Some(draft) = state.session_drafts.lock().remove(&session_id) {
+        let _ = std::fs::remove_file(draft);
+    } else if let Some(draft) = paths::find_draft_file(&session_id) {
+        let _ = std::fs::remove_file(draft);
+    }
+
+    // Legacy UUID folder cleanup
+    if let Ok(legacy_root) = paths::legacy_sessions_dir() {
+        let legacy = legacy_root.join(&session_id);
+        if legacy.exists() {
+            let _ = std::fs::remove_dir_all(legacy);
         }
     }
+
     if state
         .active_session
         .lock()
@@ -707,8 +907,11 @@ fn export_session_cmd(
 }
 
 #[tauri::command]
-fn list_session_files(session_id: String) -> Result<Vec<String>, String> {
-    let dir = paths::session_dir(&session_id)?;
+fn list_session_files(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<Vec<String>, String> {
+    let dir = resolve_session_dir(&state, &session_id)?;
     let mut files = Vec::new();
     if dir.exists() {
         for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
@@ -729,8 +932,11 @@ struct SessionMediaTrack {
 }
 
 #[tauri::command]
-fn get_session_media(session_id: String) -> Result<Vec<SessionMediaTrack>, String> {
-    let dir = paths::session_dir(&session_id)?;
+fn get_session_media(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<Vec<SessionMediaTrack>, String> {
+    let dir = resolve_session_dir(&state, &session_id)?;
     let mut by_id: std::collections::HashMap<String, SessionMediaTrack> =
         std::collections::HashMap::new();
 
@@ -775,30 +981,41 @@ fn get_session_media(session_id: String) -> Result<Vec<SessionMediaTrack>, Strin
 }
 
 #[tauri::command]
-fn save_session_thumbnail(session_id: String, jpeg: Vec<u8>) -> Result<String, String> {
+fn save_session_thumbnail(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    jpeg: Vec<u8>,
+) -> Result<String, String> {
     if jpeg.is_empty() {
         return Err("Empty thumbnail".into());
     }
-    let dir = paths::session_dir(&session_id)?;
+    let dir = ensure_recording_dir(&state, &session_id)?;
     let path = dir.join("thumbnail.jpg");
     std::fs::write(&path, jpeg).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-fn get_session_thumbnail(session_id: String) -> Result<Option<String>, String> {
-    let dir = paths::sessions_dir()?.join(&session_id);
-    let path = dir.join("thumbnail.jpg");
-    if path.is_file() {
-        Ok(Some(path.to_string_lossy().to_string()))
-    } else {
-        Ok(None)
+fn get_session_thumbnail(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<Option<String>, String> {
+    let dir = resolve_session_dir(&state, &session_id).ok();
+    let path = dir.map(|d| d.join("thumbnail.jpg"));
+    if let Some(path) = path {
+        if path.is_file() {
+            return Ok(Some(path.to_string_lossy().to_string()));
+        }
     }
+    Ok(None)
 }
 
 #[tauri::command]
-fn reveal_session_folder(session_id: String) -> Result<String, String> {
-    let dir = paths::sessions_dir()?.join(&session_id);
+fn reveal_session_folder(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<String, String> {
+    let dir = resolve_session_dir(&state, &session_id)?;
     if !dir.exists() {
         return Err("Session folder not found".into());
     }
@@ -829,13 +1046,14 @@ fn reveal_session_folder(session_id: String) -> Result<String, String> {
 /// Guest → host track return over the invite TCP session (resumable chunks).
 #[tauri::command]
 async fn return_tracks_to_host(
+    state: State<'_, Arc<AppState>>,
     invite: String,
     participant_id: String,
     session_id: String,
 ) -> Result<Vec<String>, String> {
     let ticket = p2p::decode_ticket(&invite)?;
     let mut stream = p2p::join_studio(&ticket, participant_id.clone(), participant_id.clone()).await?;
-    let dir = paths::session_dir(&session_id)?;
+    let dir = resolve_session_dir(&state, &session_id)?;
     let mut sent = Vec::new();
     for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -881,6 +1099,8 @@ pub fn run() {
             get_mic_level,
             stop_audio_recording,
             save_video_track,
+            begin_video_track,
+            append_video_chunk,
             finalize_session,
             discard_session,
             leave_studio,

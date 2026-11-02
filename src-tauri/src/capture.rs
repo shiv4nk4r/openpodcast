@@ -7,6 +7,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 
+/// Laptop / USB mics often peak well below full scale. Boost into a usable
+/// range, then soft-limit so we don't hard-clip on louder speech.
+const INPUT_GAIN: f32 = 3.0; // ~9.5 dB
+
+fn amplify_f32(sample: f32) -> i16 {
+    // Soft clip via tanh keeps peaks musical instead of brickwall-distorted
+    let shaped = (sample * INPUT_GAIN).tanh();
+    (shaped * i16::MAX as f32)
+        .round()
+        .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+fn amplify_i16(sample: i16) -> i16 {
+    amplify_f32(sample as f32 / i16::MAX as f32)
+}
+
 pub struct AudioRecorder {
     stop: Arc<AtomicBool>,
     level: Arc<Mutex<f32>>,
@@ -83,9 +99,9 @@ impl AudioRecorder {
                                 let mut peak = 0.0f32;
                                 if let Some(w) = writer_cb.lock().as_mut() {
                                     for &s in data {
-                                        peak = peak.max(s.abs());
-                                        let v = (s * i16::MAX as f32) as i16;
-                                        let _ = w.write_sample(v);
+                                        let boosted = s * INPUT_GAIN;
+                                        peak = peak.max(boosted.abs().min(1.0));
+                                        let _ = w.write_sample(amplify_f32(s));
                                     }
                                 }
                                 *level_cb.lock() = peak;
@@ -104,8 +120,10 @@ impl AudioRecorder {
                                 let mut peak = 0.0f32;
                                 if let Some(w) = writer_cb.lock().as_mut() {
                                     for &s in data {
-                                        peak = peak.max((s as f32).abs() / i16::MAX as f32);
-                                        let _ = w.write_sample(s);
+                                        let out = amplify_i16(s);
+                                        peak = peak
+                                            .max((out as f32).abs() / i16::MAX as f32);
+                                        let _ = w.write_sample(out);
                                     }
                                 }
                                 *level_cb.lock() = peak;

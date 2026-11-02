@@ -25,15 +25,27 @@ import type { StudioMode } from "../types";
 
 type Panel = "host" | "invite";
 
+const DEFAULT_STUDIO_SETTINGS = {
+  name: "Untitled Recording",
+  mode: "audio_video" as StudioMode,
+  frame_rate: 30,
+  resolution: "1080p",
+};
+
 export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
   const { studio, settings, setStudio, persistSettings } = useApp();
   const navigate = useNavigate();
   const [panel, setPanel] = useState<Panel>(initialPanel ?? "host");
-  const [booting, setBooting] = useState(!studio);
+  const [studioReady, setStudioReady] = useState(!!studio);
   const [bootError, setBootError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
   const [invite, setInvite] = useState("");
+  const bootGen = useRef(0);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const studioRef = useRef(studio);
+  studioRef.current = studio;
 
   const videoMode = (studio?.settings.mode ?? "audio_video") === "audio_video";
   const resolution = studio?.settings.resolution ?? "1080p";
@@ -60,44 +72,72 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
   const [qualityOpen, setQualityOpen] = useState(false);
   const qualityRef = useRef<HTMLDivElement | null>(null);
 
-  // Host studio bootstrap (still fine while viewing invite panel)
+  // Settings load async after mount; don't keep the default "Host" placeholder.
+  useEffect(() => {
+    const next = settings.display_name?.trim();
+    if (next) setName(next);
+  }, [settings.display_name]);
+
+  async function createHostStudio() {
+    const displayName =
+      settingsRef.current.display_name || "Host";
+    const res = await api.createStudio(DEFAULT_STUDIO_SETTINGS, displayName);
+    const next = {
+      role: "host" as const,
+      sessionId: res.session_id,
+      participantId: "host",
+      invite: res.invite,
+      settings: DEFAULT_STUDIO_SETTINGS,
+      displayName,
+    };
+    setStudio(next);
+    setStudioReady(true);
+    setBootError(null);
+    return next;
+  }
+
+  // Create host studio in the background — never block the lobby UI on it.
   useEffect(() => {
     if (studio) {
-      setBooting(false);
+      setStudioReady(true);
+      setBootError(null);
       return;
     }
+
+    const gen = ++bootGen.current;
     let cancelled = false;
-    (async () => {
+
+    void (async () => {
       try {
-        const studioSettings = {
-          name: "Untitled Recording",
-          mode: "audio_video" as StudioMode,
-          frame_rate: 30,
-          resolution: "1080p",
-        };
-        const res = await api.createStudio(
-          studioSettings,
-          settings.display_name || "Host",
-        );
-        if (cancelled) return;
-        setStudio({
-          role: "host",
-          sessionId: res.session_id,
-          participantId: "host",
-          invite: res.invite,
-          settings: studioSettings,
-          displayName: settings.display_name || "Host",
-        });
+        const res = await Promise.race([
+          createHostStudio(),
+          new Promise<never>((_, reject) =>
+            window.setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    "Studio setup timed out. You can still check devices — try Join Studio again.",
+                  ),
+                ),
+              8000,
+            ),
+          ),
+        ]);
+        if (cancelled || gen !== bootGen.current) return;
+        void res;
       } catch (e) {
-        if (!cancelled) setBootError(String(e));
-      } finally {
-        if (!cancelled) setBooting(false);
+        if (!cancelled && gen === bootGen.current && !studioRef.current) {
+          setBootError(String(e).replace(/^Error:\s*/i, ""));
+          setStudioReady(false);
+        }
       }
     })();
+
     return () => {
       cancelled = true;
     };
-  }, [studio, settings.display_name, setStudio]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [studio, setStudio]);
 
   useEffect(() => {
     const nextMic = pickPreferred(deviceList.mics, settings.preferred_mic_id);
@@ -110,12 +150,12 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
   }, [deviceList.mics, deviceList.cameras, deviceList.speakers]);
 
   useEffect(() => {
-    if (booting || (!audioId && !videoId)) return;
+    if (!audioId && !videoId) return;
     void media.start({
       audio: audioId || undefined,
       video: videoMode ? videoId || undefined : undefined,
     });
-  }, [booting, audioId, videoId, videoMode, resolution, fps]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [audioId, videoId, videoMode, resolution, fps]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     media.toggleTrack("video", camOn);
@@ -178,13 +218,24 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
   }
 
   async function joinAsHost() {
-    if (!studio) return;
-    await persistDevices();
-    setStudio({
-      ...studio,
-      displayName: name.trim() || "Host",
-    });
-    navigate("/studio");
+    setBusy(true);
+    setBootError(null);
+    try {
+      await persistDevices();
+      let current = studioRef.current;
+      if (!current || current.role !== "host") {
+        current = await createHostStudio();
+      }
+      setStudio({
+        ...current,
+        displayName: name.trim() || "Host",
+      });
+      navigate("/studio");
+    } catch (e) {
+      setBootError(String(e).replace(/^Error:\s*/i, ""));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function joinWithInvite() {
@@ -226,52 +277,6 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
     setPanel("host");
   }
 
-  if (booting) {
-    return (
-      <div className="rs-lobby">
-        <header className="rs-lobby-top">
-          <div className="rs-rec-brand">
-            <span className="rs-rec-dot" />
-            OpenPodcast
-          </div>
-          <button
-            type="button"
-            className="rs-rec-back"
-            onClick={() => navigate("/settings")}
-          >
-            <IconSettings size={16} stroke={1.75} />
-            Settings
-          </button>
-        </header>
-        <div className="rs-lobby-loading">Preparing your studio…</div>
-      </div>
-    );
-  }
-
-  if (bootError) {
-    return (
-      <div className="rs-lobby">
-        <header className="rs-lobby-top">
-          <div className="rs-rec-brand">
-            <span className="rs-rec-dot" />
-            OpenPodcast
-          </div>
-          <button
-            type="button"
-            className="rs-rec-back"
-            onClick={() => navigate("/settings")}
-          >
-            <IconSettings size={16} stroke={1.75} />
-            Settings
-          </button>
-        </header>
-        <div className="rs-lobby-loading" style={{ color: "var(--record)" }}>
-          {bootError}
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="rs-lobby">
       <header className="rs-lobby-top">
@@ -297,6 +302,27 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
                 You’re about to join a new recording or podcast
               </p>
               <h1 className="rs-lobby-title">Let’s check your cam and mic</h1>
+              {bootError && (
+                <p className="rs-join-error">
+                  {bootError}{" "}
+                  <button
+                    type="button"
+                    className="rs-link"
+                    onClick={() => {
+                      setBootError(null);
+                      bootGen.current += 1;
+                      void createHostStudio().catch((e) =>
+                        setBootError(String(e).replace(/^Error:\s*/i, "")),
+                      );
+                    }}
+                  >
+                    Retry
+                  </button>
+                </p>
+              )}
+              {!studioReady && !bootError && (
+                <p className="rs-lobby-eyebrow">Preparing studio in the background…</p>
+              )}
 
               <div className="rs-name-row">
                 <input
@@ -333,9 +359,10 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
               <button
                 type="button"
                 className="rs-join-btn"
+                disabled={busy}
                 onClick={() => void joinAsHost()}
               >
-                Join Studio
+                {busy ? "Joining…" : "Join Studio"}
               </button>
 
               <p className="rs-lobby-foot">

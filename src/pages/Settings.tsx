@@ -44,6 +44,8 @@ export default function Settings() {
   const [paths, setPaths] = useState<{
     data: string;
     sessions: string;
+    recordings: string;
+    drafts: string;
     models: string;
   } | null>(null);
   const [oauthCode, setOauthCode] = useState("");
@@ -112,7 +114,12 @@ export default function Settings() {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: cameraId ? { deviceId: { exact: cameraId } } : false,
           audio: micId
-            ? { deviceId: { exact: micId }, echoCancellation: echo }
+            ? {
+                deviceId: { exact: micId },
+                echoCancellation: echo,
+                noiseSuppression: false,
+                autoGainControl: true,
+              }
             : false,
         });
         if (cancelled) {
@@ -234,7 +241,7 @@ export default function Settings() {
         directory: true,
         multiple: false,
         title: "Choose recording folder",
-        defaultPath: folder || paths?.sessions || undefined,
+        defaultPath: folder || paths?.recordings || paths?.sessions || undefined,
       });
       if (selected == null) return;
       const next = Array.isArray(selected) ? selected[0] : selected;
@@ -359,7 +366,10 @@ export default function Settings() {
                 >
                   <IconFolder size={16} stroke={1.75} />
                   <span className={folder ? "" : "is-placeholder"}>
-                    {folder || paths?.sessions || "Choose where recordings are saved"}
+                    {folder ||
+                      paths?.recordings ||
+                      paths?.sessions ||
+                      "Choose where recordings are saved"}
                   </span>
                 </button>
                 {folder ? (
@@ -630,6 +640,10 @@ export default function Settings() {
           </button>
           {paths && (
             <p className="rs-settings-paths">
+              Recordings · {paths.recordings}
+              <br />
+              Drafts · {paths.drafts}
+              <br />
               Data · {paths.data}
             </p>
           )}

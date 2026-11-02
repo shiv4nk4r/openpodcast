@@ -32,7 +32,7 @@ import { api } from "../api";
 import { LiveCameraPreview } from "../components/LiveCameraPreview";
 import { Select } from "../components/Select";
 import { pickPreferred, useDeviceList } from "../hooks/useDeviceList";
-import { blobToBytes, useLocalMedia } from "../hooks/useLocalMedia";
+import { blobToBytes, blobToUint8, useLocalMedia } from "../hooks/useLocalMedia";
 import { useApp } from "../state";
 import type { PeerInfo } from "../types";
 
@@ -495,9 +495,32 @@ export default function Recording() {
       /* MediaRecorder still captures */
     }
     try {
-      media.startRecording();
-    } catch {
-      /* ignore */
+      const ext = media.pickRecorderExtension();
+      await api.beginVideoTrack(
+        active.sessionId,
+        active.participantId,
+        ext,
+      );
+      media.startRecording({
+        timesliceMs: 2000,
+        onChunk: async (chunk) => {
+          const bytes = await blobToUint8(chunk);
+          if (!bytes.byteLength) return;
+          await api.appendVideoChunk(
+            active.sessionId,
+            active.participantId,
+            bytes,
+            ext,
+          );
+        },
+      });
+    } catch (e) {
+      console.error("Failed to start streamed video recording", e);
+      try {
+        media.startRecording();
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -524,12 +547,24 @@ export default function Recording() {
       /* optional */
     }
 
-    // Only persist video if we actually started MediaRecorder via Record
-    const blob = await media.stopRecording();
-    if (blob && blob.size > 0) {
-      const bytes = await blobToBytes(blob);
-      const ext = blob.type.includes("mp4") ? "mp4" : "webm";
-      await api.saveVideoTrack(active.sessionId, active.participantId, bytes, ext);
+    // Flush remaining MediaRecorder slices to disk (streaming) or fall back to one-shot save
+    try {
+      const blob = await media.stopRecording();
+      if (blob && blob.size > 0) {
+        const bytes = await blobToBytes(blob);
+        const ext = blob.type.includes("mp4") ? "mp4" : "webm";
+        await api.saveVideoTrack(
+          active.sessionId,
+          active.participantId,
+          bytes,
+          ext,
+        );
+      }
+    } catch (e) {
+      console.error("Video finalize failed", e);
+      alert(
+        `Recording could not finish saving video: ${String(e)}\n\nAudio may still be available.`,
+      );
     }
 
     setUploadFrac(0.55);
@@ -691,6 +726,7 @@ export default function Recording() {
                   className="rs-stage-preview"
                   setVideoEl={media.setVideoEl}
                   mirror={!sharing}
+                  maxFps={recording ? 12 : 24}
                 />
               ) : (
                 <div className="rs-stage-empty">{active.displayName}</div>
@@ -1145,10 +1181,11 @@ export default function Recording() {
       {showStayModal && (
         <div className="modal-backdrop">
           <div className="modal">
-            <h3>Stay until uploads finish</h3>
+            <h3>Finishing your recording</h3>
             <p style={{ color: "var(--text-muted)" }}>
-              High-quality tracks are saving locally
-              {settings.drive_connected ? " and uploading to Google Drive" : ""}.
+              Flushing the last video slices to disk
+              {settings.drive_connected ? " and uploading to Google Drive" : ""}
+              . Most of the take was already saved while you recorded.
             </p>
             <div className="level-meter" style={{ margin: "16px 0" }}>
               <span style={{ width: `${uploadFrac * 100}%` }} />

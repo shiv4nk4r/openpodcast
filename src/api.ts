@@ -23,7 +23,13 @@ export const api = {
       apiKey,
     }),
   getAppPaths: () =>
-    invoke<{ data: string; sessions: string; models: string }>("get_app_paths"),
+    invoke<{
+      data: string;
+      sessions: string;
+      recordings: string;
+      drafts: string;
+      models: string;
+    }>("get_app_paths"),
   listSessions: () => invoke<SessionRecord[]>("list_sessions"),
   getSession: (id: string) => invoke<SessionRecord | null>("get_session", { id }),
   renameSession: (sessionId: string, name: string) =>
@@ -70,13 +76,37 @@ export const api = {
   saveVideoTrack: (
     sessionId: string,
     participantId: string,
-    data: number[],
+    data: number[] | Uint8Array,
     extension: string,
   ) =>
     invoke<string>("save_video_track", {
       sessionId,
       participantId,
-      data,
+      data: Array.from(data),
+      extension,
+    }),
+  /** Truncate/create the on-disk video file before streaming chunks. */
+  beginVideoTrack: (
+    sessionId: string,
+    participantId: string,
+    extension: string,
+  ) =>
+    invoke<string>("begin_video_track", {
+      sessionId,
+      participantId,
+      extension,
+    }),
+  /** Append one MediaRecorder timeslice (keeps long recordings off the JS heap). */
+  appendVideoChunk: (
+    sessionId: string,
+    participantId: string,
+    data: Uint8Array,
+    extension: string,
+  ) =>
+    invoke<number>("append_video_chunk", {
+      sessionId,
+      participantId,
+      data: Array.from(data),
       extension,
     }),
   finalizeSession: (
