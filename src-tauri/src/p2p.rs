@@ -167,6 +167,10 @@ impl StudioHost {
         encode_ticket(&self.ticket)
     }
 
+    pub fn update_studio_settings(&mut self, settings: StudioSettings) {
+        self.ticket.studio = settings;
+    }
+
     pub fn admit(&self, participant_id: &str) {
         if let Some(p) = self.peers.lock().get_mut(participant_id) {
             p.admitted = true;

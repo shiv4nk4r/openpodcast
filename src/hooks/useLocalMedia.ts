@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { resolutionToSize } from "../lib/studioQuality";
 
 export function useLocalMedia(opts: {
   video: boolean;
@@ -6,6 +7,8 @@ export function useLocalMedia(opts: {
   echoCancellation?: boolean;
   /** When true, caller must invoke start() with preferred device IDs. */
   skipAutoStart?: boolean;
+  resolution?: string;
+  frameRate?: number;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -77,6 +80,8 @@ export function useLocalMedia(opts: {
       setError(null);
       try {
         streamRef.current?.getTracks().forEach((t) => t.stop());
+        const size = resolutionToSize(opts.resolution ?? "1080p");
+        const fps = opts.frameRate && opts.frameRate > 0 ? opts.frameRate : 30;
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: opts.audio
             ? {
@@ -88,9 +93,9 @@ export function useLocalMedia(opts: {
           video: opts.video
             ? {
                 deviceId: deviceIds?.video ? { exact: deviceIds.video } : undefined,
-                width: { ideal: 1920 },
-                height: { ideal: 1080 },
-                frameRate: { ideal: 30 },
+                width: { ideal: size.width },
+                height: { ideal: size.height },
+                frameRate: { ideal: fps },
               }
             : false,
         });
@@ -110,7 +115,7 @@ export function useLocalMedia(opts: {
         setReady(false);
       }
     },
-    [opts.audio, opts.video, opts.echoCancellation],
+    [opts.audio, opts.video, opts.echoCancellation, opts.resolution, opts.frameRate],
   );
 
   useEffect(() => {

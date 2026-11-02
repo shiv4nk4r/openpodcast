@@ -26,6 +26,8 @@ export const api = {
     invoke<{ data: string; sessions: string; models: string }>("get_app_paths"),
   listSessions: () => invoke<SessionRecord[]>("list_sessions"),
   getSession: (id: string) => invoke<SessionRecord | null>("get_session", { id }),
+  renameSession: (sessionId: string, name: string) =>
+    invoke<SessionRecord>("rename_session", { sessionId, name }),
   createStudio: (settings: StudioSettings, hostName: string) =>
     invoke<{
       session_id: string;
@@ -34,6 +36,8 @@ export const api = {
       session: SessionRecord;
     }>("create_studio", { settings, hostName }),
   getInvite: () => invoke<string>("get_invite"),
+  updateStudioSettings: (sessionId: string, settings: StudioSettings) =>
+    invoke<StudioSettings>("update_studio_settings", { sessionId, settings }),
   listPeers: () => invoke<PeerInfo[]>("list_peers"),
   admitGuest: (participantId: string) =>
     invoke<void>("admit_guest", { participantId }),
@@ -88,6 +92,9 @@ export const api = {
       padOffsetsMs,
     }),
   discardSession: (sessionId: string) =>
+    invoke<void>("discard_session", { sessionId }),
+  /** Permanently delete a saved recording and its local files. */
+  deleteSession: (sessionId: string) =>
     invoke<void>("discard_session", { sessionId }),
   leaveStudio: () => invoke<void>("leave_studio"),
   beginDriveOauth: () => invoke<string>("begin_drive_oauth"),

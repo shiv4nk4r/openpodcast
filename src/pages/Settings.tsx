@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-shell";
 import {
   IconArrowLeft,
   IconCamera,
+  IconFolder,
   IconMicrophone,
-  IconSettings,
+  IconRefresh,
+  IconVideo,
   IconVolume,
 } from "@tabler/icons-react";
 import { api } from "../api";
@@ -33,8 +35,6 @@ export default function Settings() {
 
   const [displayName, setDisplayName] = useState(settings.display_name);
   const [folder, setFolder] = useState(settings.recording_folder ?? "");
-  const [aiUrl, setAiUrl] = useState(settings.ai_base_url ?? "");
-  const [aiKey, setAiKey] = useState("");
   const [echo, setEcho] = useState(settings.echo_cancellation);
   const [cameraId, setCameraId] = useState(settings.preferred_camera_id ?? "");
   const [micId, setMicId] = useState(settings.preferred_mic_id ?? "");
@@ -45,18 +45,24 @@ export default function Settings() {
   const [favoriteMics, setFavoriteMics] = useState<string[]>(
     settings.preferred_mic_id ? [settings.preferred_mic_id] : [],
   );
-  const [paths, setPaths] = useState<{ data: string; sessions: string; models: string } | null>(
-    null,
-  );
+  const [paths, setPaths] = useState<{
+    data: string;
+    sessions: string;
+    models: string;
+  } | null>(null);
   const [oauthCode, setOauthCode] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
-  const [whisperReady, setWhisperReady] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [micLevel, setMicLevel] = useState(0);
+
+  // AI provider / Whisper — paused for now
+  // const [aiUrl, setAiUrl] = useState(settings.ai_base_url ?? "");
+  // const [aiKey, setAiKey] = useState("");
+  // const [whisperReady, setWhisperReady] = useState(false);
 
   useEffect(() => {
     setDisplayName(settings.display_name);
     setFolder(settings.recording_folder ?? "");
-    setAiUrl(settings.ai_base_url ?? "");
     setEcho(settings.echo_cancellation);
     setCameraId(settings.preferred_camera_id ?? "");
     setMicId(settings.preferred_mic_id ?? "");
@@ -93,10 +99,7 @@ export default function Settings() {
 
   useEffect(() => {
     api.getAppPaths().then(setPaths).catch(() => undefined);
-    api
-      .whisperModelStatus()
-      .then((s) => setWhisperReady(s.ready))
-      .catch(() => undefined);
+    // api.whisperModelStatus().then((s) => setWhisperReady(s.ready)).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -173,24 +176,32 @@ export default function Settings() {
   }, [cameraId, micId, echo]);
 
   async function save() {
-    const activeCam =
-      (favoriteCams.includes(cameraId) ? cameraId : favoriteCams[0]) || cameraId || null;
-    const activeMic =
-      (favoriteMics.includes(micId) ? micId : favoriteMics[0]) || micId || null;
-    await api.saveSettings({
-      ...settings,
-      display_name: displayName,
-      recording_folder: folder || null,
-      echo_cancellation: echo,
-      preferred_camera_id: activeCam,
-      preferred_mic_id: activeMic,
-      preferred_speaker_id: speakerId || null,
-    });
-    if (aiUrl || aiKey) {
-      await api.setAiProvider(aiUrl, aiKey);
+    setSaving(true);
+    setMsg(null);
+    try {
+      const activeCam =
+        (favoriteCams.includes(cameraId) ? cameraId : favoriteCams[0]) ||
+        cameraId ||
+        null;
+      const activeMic =
+        (favoriteMics.includes(micId) ? micId : favoriteMics[0]) || micId || null;
+      await api.saveSettings({
+        ...settings,
+        display_name: displayName,
+        recording_folder: folder || null,
+        echo_cancellation: echo,
+        preferred_camera_id: activeCam,
+        preferred_mic_id: activeMic,
+        preferred_speaker_id: speakerId || null,
+      });
+      // if (aiUrl || aiKey) await api.setAiProvider(aiUrl, aiKey);
+      await refreshSettings();
+      setMsg("Saved");
+    } catch (e) {
+      setMsg(String(e));
+    } finally {
+      setSaving(false);
     }
-    await refreshSettings();
-    setMsg("Saved — theme, devices, and profile updated");
   }
 
   async function connectDrive() {
@@ -231,30 +242,45 @@ export default function Settings() {
   }));
 
   return (
-    <div className="dashboard">
-      <aside className="side-nav">
-        <div className="brand">OpenPodcast</div>
-        <Link className="nav-item" to="/recordings">
-          <IconArrowLeft size={16} stroke={1.75} />
-          Recordings
-        </Link>
-        <button className="nav-item active">
-          <IconSettings size={16} stroke={1.75} />
-          Settings
-        </button>
-      </aside>
-      <main className="main-pane">
-        <h1 className="page-title">Settings</h1>
-        <p className="page-sub">
-          Theme the booth, then pick which cameras and mics belong in your setup.
+    <div className="rs-lobby rs-recordings rs-settings">
+      <header className="rs-rec-top">
+        <div className="rs-rec-brand">
+          <span className="rs-rec-dot" />
+          OpenPodcast
+        </div>
+        <div className="rs-rec-actions">
+          <button
+            type="button"
+            className="rs-rec-back"
+            onClick={() => navigate("/")}
+          >
+            <IconArrowLeft size={16} stroke={1.75} />
+            Studio
+          </button>
+          <button
+            type="button"
+            className="rs-rec-back"
+            onClick={() => navigate("/recordings")}
+          >
+            <IconVideo size={16} stroke={1.75} />
+            Recordings
+          </button>
+        </div>
+      </header>
+
+      <div className="rs-rec-shell rs-settings-shell">
+        <p className="rs-lobby-eyebrow">Preferences</p>
+        <h1 className="rs-lobby-title">Settings</h1>
+        <p className="rs-rec-sub">
+          Theme the booth, set your name, and choose the devices you record with.
         </p>
 
-        <div className="form-card" style={{ marginBottom: 20 }}>
-          <h3 style={{ marginTop: 0, fontFamily: "var(--font-display)" }}>Appearance</h3>
-          <p style={{ color: "var(--text-muted)", fontSize: "0.9rem", marginTop: 0 }}>
-            In-app themes — no native system chrome for pickers.
-          </p>
-          <div className="theme-grid">
+        <section className="rs-settings-card">
+          <div className="rs-settings-card-head">
+            <h2>Appearance</h2>
+            <p>In-app look — no native system chrome for pickers.</p>
+          </div>
+          <div className="theme-grid rs-settings-themes">
             {themes.map((t) => (
               <button
                 key={t.id}
@@ -262,89 +288,101 @@ export default function Settings() {
                 className={`theme-card ${theme === t.id ? "is-active" : ""}`}
                 onClick={() => setTheme(t.id)}
               >
-                <div className="theme-swatch" style={{ background: THEME_SWATCHES[t.id] }} />
+                <div
+                  className="theme-swatch"
+                  style={{ background: THEME_SWATCHES[t.id] }}
+                />
                 <strong>{t.label}</strong>
                 <span>{t.description}</span>
               </button>
             ))}
           </div>
-        </div>
+        </section>
 
-        <div className="form-card" style={{ marginBottom: 20 }}>
-          <div className="field">
-            <label>Display name</label>
-            <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+        <section className="rs-settings-card">
+          <div className="rs-settings-card-head">
+            <h2>Profile</h2>
+            <p>How you show up in the lobby and where takes are stored.</p>
           </div>
-          <div className="field">
-            <label>Recording folder override (optional)</label>
-            <input
-              value={folder}
-              onChange={(e) => setFolder(e.target.value)}
-              placeholder="Leave empty to use app data"
-            />
+          <div className="rs-settings-fields">
+            <div className="field">
+              <label>Display name</label>
+              <input
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                placeholder="Host"
+              />
+            </div>
+            <div className="field">
+              <label>Recording folder override</label>
+              <div className="rs-settings-input-row">
+                <IconFolder size={16} stroke={1.75} />
+                <input
+                  value={folder}
+                  onChange={(e) => setFolder(e.target.value)}
+                  placeholder="Leave empty to use app data"
+                />
+              </div>
+            </div>
+            <button
+              type="button"
+              className={`rs-settings-toggle${echo ? " is-on" : ""}`}
+              onClick={() => setEcho((v) => !v)}
+              aria-pressed={echo}
+            >
+              <span>
+                <strong>Echo cancellation</strong>
+                <small>Default for new studio sessions</small>
+              </span>
+              <span className="rs-settings-switch" aria-hidden />
+            </button>
           </div>
-          <label className="toggle">
-            <span>Echo cancellation default</span>
-            <input
-              type="checkbox"
-              checked={echo}
-              onChange={(e) => setEcho(e.target.checked)}
-            />
-          </label>
-        </div>
+        </section>
 
-        <div className="form-card" style={{ marginBottom: 20 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-            <h3 style={{ marginTop: 0, marginBottom: 4, fontFamily: "var(--font-display)" }}>
-              Camera & microphone
-            </h3>
-            <button className="btn btn-ghost" type="button" onClick={() => void devices.refresh()}>
+        <section className="rs-settings-card">
+          <div className="rs-settings-card-head rs-settings-card-head-row">
+            <div>
+              <h2>Camera & microphone</h2>
+              <p>
+                {devices.loading
+                  ? "Scanning devices…"
+                  : `${devices.cameras.length} cameras · ${devices.mics.length} mics · ${devices.speakers.length} speakers`}
+              </p>
+            </div>
+            <button
+              type="button"
+              className="rs-rec-back"
+              onClick={() => void devices.refresh()}
+            >
+              <IconRefresh size={15} stroke={1.75} />
               Refresh
             </button>
           </div>
-          <p style={{ color: "var(--text-muted)", fontSize: "0.9rem", marginTop: 0 }}>
-            {devices.loading
-              ? "Scanning devices…"
-              : `${devices.cameras.length} cameras · ${devices.mics.length} mics · ${devices.speakers.length} speakers`}
-          </p>
 
-          <div className="device-layout">
-            <div className="device-preview">
+          <div className="rs-settings-devices">
+            <div className="rs-settings-preview">
               {cameraId ? (
                 <video
                   ref={previewRef}
                   muted
                   playsInline
                   autoPlay
-                  style={{
-                    width: "100%",
-                    height: "100%",
-                    objectFit: "cover",
-                    transform: "scaleX(-1)",
-                  }}
+                  className="rs-settings-preview-video"
                 />
               ) : (
-                <div
-                  style={{
-                    height: "100%",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    color: "var(--text-muted)",
-                    padding: 12,
-                    textAlign: "center",
-                  }}
-                >
+                <div className="rs-settings-preview-empty">
+                  <IconCamera size={28} stroke={1.5} />
                   Select a camera
                 </div>
               )}
             </div>
-            <div>
+
+            <div className="rs-settings-device-fields">
               <Select
                 multiple
                 icon={<IconCamera size={18} stroke={1.75} />}
                 label={`Favorite cameras${devices.cameras.length > 1 ? ` (${devices.cameras.length})` : ""}`}
-                hint="Multi-select the cameras you use often. Active camera is chosen below."
+                hint="Multi-select the cameras you use often."
                 value={favoriteCams}
                 onChange={(vals) => {
                   setFavoriteCams(vals);
@@ -392,7 +430,7 @@ export default function Settings() {
                 ).map((d) => ({ value: d.deviceId, label: d.label }))}
                 emptyLabel="No microphone selected"
               />
-              <div className="level-meter" style={{ marginBottom: 12 }}>
+              <div className="level-meter rs-settings-meter">
                 <span style={{ width: `${Math.round(micLevel * 100)}%` }} />
               </div>
               <Select
@@ -406,98 +444,101 @@ export default function Settings() {
               />
             </div>
           </div>
+        </section>
 
-          <button className="btn btn-primary" onClick={() => void save()}>
-            Save theme & devices
-          </button>
-        </div>
-
-        <div className="form-card" style={{ marginBottom: 20 }}>
-          <h3 style={{ marginTop: 0, fontFamily: "var(--font-display)" }}>Google Drive</h3>
-          <p style={{ color: "var(--text-muted)", fontSize: "0.9rem" }}>
-            Status: {settings.drive_connected ? "Connected" : "Not connected"}
-          </p>
+        <section className="rs-settings-card">
+          <div className="rs-settings-card-head">
+            <h2>Google Drive</h2>
+            <p>
+              Status:{" "}
+              <strong className={settings.drive_connected ? "is-ok" : ""}>
+                {settings.drive_connected ? "Connected" : "Not connected"}
+              </strong>
+            </p>
+          </div>
           {!settings.drive_connected ? (
-            <>
-              <button className="btn btn-primary" onClick={() => void connectDrive()}>
+            <div className="rs-settings-fields">
+              <button
+                type="button"
+                className="rs-join-btn rs-settings-primary"
+                onClick={() => void connectDrive()}
+              >
                 Connect Google Drive
               </button>
-              <div className="field" style={{ marginTop: 12 }}>
+              <div className="field">
                 <label>OAuth code (from redirect)</label>
-                <input value={oauthCode} onChange={(e) => setOauthCode(e.target.value)} />
+                <input
+                  value={oauthCode}
+                  onChange={(e) => setOauthCode(e.target.value)}
+                  placeholder="Paste code here"
+                />
               </div>
-              <button className="btn btn-secondary" onClick={() => void finishDrive()}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => void finishDrive()}
+              >
                 Complete connection
               </button>
-            </>
+            </div>
           ) : (
             <button
+              type="button"
               className="btn btn-secondary"
               onClick={async () => {
                 await api.disconnectDrive();
                 await refreshSettings();
+                setMsg("Google Drive disconnected");
               }}
             >
               Disconnect
             </button>
           )}
-        </div>
+        </section>
 
-        <div className="form-card" style={{ marginBottom: 20 }}>
-          <h3 style={{ marginTop: 0, fontFamily: "var(--font-display)" }}>AI provider</h3>
-          <p style={{ color: "var(--text-muted)", fontSize: "0.9rem", marginTop: 0 }}>
-            Used for subtitles (Whisper <code>/audio/transcriptions</code>) and show
-            notes. OpenAI, Groq, or any OpenAI-compatible endpoint works. Cursor
-            chat is not an API endpoint — paste a provider URL + key here.
-          </p>
-          <div className="field">
-            <label>Base URL</label>
-            <input
-              value={aiUrl}
-              onChange={(e) => setAiUrl(e.target.value)}
-              placeholder="https://api.openai.com/v1"
-            />
+        {/* AI provider — paused for now
+        <section className="rs-settings-card">
+          <div className="rs-settings-card-head">
+            <h2>AI provider</h2>
+            <p>
+              Used for subtitles (Whisper) and show notes. OpenAI, Groq, or any
+              OpenAI-compatible endpoint.
+            </p>
           </div>
-          <div className="field">
-            <label>API key</label>
-            <input
-              type="password"
-              value={aiKey}
-              onChange={(e) => setAiKey(e.target.value)}
-              placeholder={settings.ai_has_key ? "•••••••• (saved)" : ""}
-            />
+          <div className="rs-settings-fields">
+            <div className="field">
+              <label>Base URL</label>
+              <input
+                value={aiUrl}
+                onChange={(e) => setAiUrl(e.target.value)}
+                placeholder="https://api.openai.com/v1"
+              />
+            </div>
+            <div className="field">
+              <label>API key</label>
+              <input
+                type="password"
+                value={aiKey}
+                onChange={(e) => setAiKey(e.target.value)}
+                placeholder={settings.ai_has_key ? "•••••••• (saved)" : ""}
+              />
+            </div>
           </div>
-          <button className="btn btn-secondary" onClick={() => void save()}>
-            Save AI settings
-          </button>
-        </div>
+        </section>
+        */}
 
-        <div className="form-card" style={{ marginBottom: 20 }}>
-          <h3 style={{ marginTop: 0, fontFamily: "var(--font-display)" }}>Onboarding</h3>
-          <p style={{ color: "var(--text-muted)", fontSize: "0.9rem" }}>
-            Replay the first-run setup for this machine.
-          </p>
-          <button
-            className="btn btn-secondary"
-            type="button"
-            onClick={() => {
-              resetOnboarding();
-              navigate("/onboarding", { replace: true });
-            }}
-          >
-            Replay onboarding
-          </button>
-        </div>
-
-        <div className="form-card">
-          <h3 style={{ marginTop: 0, fontFamily: "var(--font-display)" }}>Subtitles</h3>
-          <p style={{ color: "var(--text-muted)", fontSize: "0.9rem" }}>
-            Captions can use on-device speech recognition (Apple Speech on Mac,
-            Windows Speech on PC), your AI Whisper endpoint above, or manual
-            typing in the editor. Optional local Whisper model:
-          </p>
+        {/* Subtitles / Whisper model — paused for now
+        <section className="rs-settings-card">
+          <div className="rs-settings-card-head">
+            <h2>Subtitles</h2>
+            <p>
+              Captions can use on-device speech recognition or your AI Whisper
+              endpoint. Optional local Whisper model:
+            </p>
+          </div>
           <p>Model: {whisperReady ? "Downloaded" : "Not downloaded"}</p>
           <button
+            type="button"
             className="btn btn-secondary"
             onClick={async () => {
               setMsg("Downloading Whisper model…");
@@ -512,15 +553,43 @@ export default function Settings() {
           >
             Download ggml-base.en
           </button>
+        </section>
+        */}
+
+        <section className="rs-settings-card">
+          <div className="rs-settings-card-head">
+            <h2>Onboarding</h2>
+            <p>Replay the first-run setup for this machine.</p>
+          </div>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => {
+              resetOnboarding();
+              navigate("/onboarding", { replace: true });
+            }}
+          >
+            Replay onboarding
+          </button>
           {paths && (
-            <p style={{ color: "var(--text-muted)", fontSize: "0.8rem", marginTop: 12 }}>
-              Data: {paths.data}
+            <p className="rs-settings-paths">
+              Data · {paths.data}
             </p>
           )}
-        </div>
+        </section>
 
-        {msg && <p style={{ marginTop: 16, color: "var(--accent)" }}>{msg}</p>}
-      </main>
+        <div className="rs-settings-footer">
+          <button
+            type="button"
+            className="rs-join-btn rs-settings-primary"
+            disabled={saving}
+            onClick={() => void save()}
+          >
+            {saving ? "Saving…" : "Save settings"}
+          </button>
+          {msg && <p className="rs-settings-msg">{msg}</p>}
+        </div>
+      </div>
     </div>
   );
 }

@@ -49,6 +49,8 @@ export default function Recording() {
     audio: true,
     echoCancellation: settings.echo_cancellation,
     skipAutoStart: true,
+    resolution: studio?.settings.resolution,
+    frameRate: studio?.settings.frame_rate,
   });
 
   const [peers, setPeers] = useState<PeerInfo[]>([]);
@@ -75,16 +77,36 @@ export default function Recording() {
   const startedAt = useRef<number>(0);
   const timerRef = useRef<number>(0);
   const mediaBooted = useRef(false);
+  /** Everyone who appeared in the lobby / studio during this session */
+  const rosterRef = useRef<Map<string, PeerInfo>>(new Map());
 
   useEffect(() => {
     if (!studio) navigate("/", { replace: true });
   }, [studio, navigate]);
 
+  // Seed host / self into the session roster for playback metadata
+  useEffect(() => {
+    if (!studio) return;
+    rosterRef.current.set(studio.participantId, {
+      id: studio.participantId,
+      name: studio.displayName || (studio.role === "host" ? "Host" : "Guest"),
+      role: studio.role === "host" ? "Host" : "Guest",
+      admitted: true,
+    });
+  }, [studio]);
+
   useEffect(() => {
     if (!studio || studio.role !== "host") return;
     const id = window.setInterval(async () => {
       try {
-        setPeers(await api.listPeers());
+        const list = await api.listPeers();
+        setPeers(list);
+        for (const p of list) {
+          rosterRef.current.set(p.id, {
+            ...p,
+            role: p.role || "Guest",
+          });
+        }
       } catch {
         /* ignore */
       }
@@ -225,12 +247,35 @@ export default function Recording() {
     }
 
     setUploadFrac(0.55);
-    const participants = people.map((p) => ({
-      id: p.id,
-      name: p.name.replace(" (You)", ""),
-      role: p.role,
+    // Persist host + everyone who showed up in the lobby/studio
+    const byId = new Map<string, { id: string; name: string; role: string; resolution: string }>();
+    byId.set(active.participantId, {
+      id: active.participantId,
+      name: (active.displayName || "Host").replace(" (You)", ""),
+      role: active.role === "host" ? "Host" : "Guest",
       resolution: active.settings.resolution,
-    }));
+    });
+    for (const p of rosterRef.current.values()) {
+      byId.set(p.id, {
+        id: p.id,
+        name: p.name,
+        role: p.admitted
+          ? p.role || "Guest"
+          : p.role
+            ? `${p.role} · lobby`
+            : "Lobby",
+        resolution: active.settings.resolution,
+      });
+    }
+    for (const p of people) {
+      byId.set(p.id, {
+        id: p.id,
+        name: p.name.replace(" (You)", ""),
+        role: p.role,
+        resolution: active.settings.resolution,
+      });
+    }
+    const participants = [...byId.values()];
     await api.finalizeSession(active.sessionId, duration, participants, {});
     setHasRecording(true);
     setUploadFrac(0.75);

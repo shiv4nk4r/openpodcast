@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   IconCamera,
   IconCameraOff,
+  IconChevronDown,
   IconHeadphones,
   IconMicrophone,
   IconMicrophoneOff,
@@ -15,6 +16,10 @@ import { LiveCameraPreview } from "../components/LiveCameraPreview";
 import { Select } from "../components/Select";
 import { pickPreferred, useDeviceList } from "../hooks/useDeviceList";
 import { useLocalMedia } from "../hooks/useLocalMedia";
+import {
+  FRAME_RATE_OPTIONS,
+  RESOLUTION_OPTIONS,
+} from "../lib/studioQuality";
 import { useApp } from "../state";
 import type { StudioMode } from "../types";
 
@@ -34,6 +39,7 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
   const studioName = studio?.settings.name ?? "OpenPodcast Studio";
   const resolution = studio?.settings.resolution ?? "1080p";
   const fps = studio?.settings.frame_rate ?? 30;
+  const canEditQuality = studio?.role !== "guest";
 
   const deviceList = useDeviceList();
   const media = useLocalMedia({
@@ -41,6 +47,8 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
     audio: true,
     echoCancellation: settings.echo_cancellation,
     skipAutoStart: true,
+    resolution,
+    frameRate: fps,
   });
 
   const [name, setName] = useState(settings.display_name || "");
@@ -50,6 +58,8 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
   const [speakerId, setSpeakerId] = useState(settings.preferred_speaker_id ?? "");
   const [camOn, setCamOn] = useState(true);
   const [micOn, setMicOn] = useState(true);
+  const [qualityOpen, setQualityOpen] = useState(false);
+  const qualityRef = useRef<HTMLDivElement | null>(null);
 
   // Host studio bootstrap (still fine while viewing invite panel)
   useEffect(() => {
@@ -106,7 +116,7 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
       audio: audioId || undefined,
       video: videoMode ? videoId || undefined : undefined,
     });
-  }, [booting, audioId, videoId, videoMode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [booting, audioId, videoId, videoMode, resolution, fps]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     media.toggleTrack("video", camOn);
@@ -115,6 +125,42 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
   useEffect(() => {
     media.toggleTrack("audio", micOn);
   }, [micOn]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!qualityOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!qualityRef.current?.contains(e.target as Node)) {
+        setQualityOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setQualityOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [qualityOpen]);
+
+  async function applyQuality(next: { resolution?: string; frameRate?: number }) {
+    if (!studio || studio.role === "guest") return;
+    const settingsNext = {
+      ...studio.settings,
+      resolution: next.resolution ?? studio.settings.resolution,
+      frame_rate: next.frameRate ?? studio.settings.frame_rate,
+    };
+    const nextStudio = { ...studio, settings: settingsNext };
+    setStudio(nextStudio);
+    try {
+      await api.updateStudioSettings(studio.sessionId, settingsNext);
+      const invite = await api.getInvite().catch(() => undefined);
+      if (invite) setStudio({ ...nextStudio, invite });
+    } catch (e) {
+      console.warn("Failed to persist studio quality", e);
+    }
+  }
 
   async function persistDevices(next?: {
     mic?: string;
@@ -324,19 +370,68 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
 
         <section className="rs-lobby-right">
           <div className="rs-preview-card">
-            <div className="rs-preview-frame">
-              {videoMode && camOn ? (
-                <LiveCameraPreview
-                  className="rs-preview-video"
-                  setVideoEl={media.setVideoEl}
-                />
-              ) : (
-                <div className="rs-preview-fallback">
-                  {(name || "Y").slice(0, 1).toUpperCase()}
-                </div>
-              )}
-              <div className="rs-preview-badge">
-                {resolution} / {fps}fps
+            <div
+              className={`rs-preview-frame${qualityOpen ? " is-quality-open" : ""}`}
+            >
+              <div className="rs-preview-media">
+                {videoMode && camOn ? (
+                  <LiveCameraPreview
+                    className="rs-preview-video"
+                    setVideoEl={media.setVideoEl}
+                  />
+                ) : (
+                  <div className="rs-preview-fallback">
+                    {(name || "Y").slice(0, 1).toUpperCase()}
+                  </div>
+                )}
+              </div>
+              <div className="rs-quality" ref={qualityRef}>
+                <button
+                  type="button"
+                  className={`rs-preview-badge${canEditQuality ? " is-editable" : ""}`}
+                  disabled={!canEditQuality}
+                  aria-expanded={qualityOpen}
+                  aria-haspopup="dialog"
+                  title={
+                    canEditQuality
+                      ? "Change resolution and frame rate"
+                      : "Recording quality (set by host)"
+                  }
+                  onClick={() => {
+                    if (canEditQuality) setQualityOpen((v) => !v);
+                  }}
+                >
+                  {resolution} / {fps}fps
+                  {canEditQuality && (
+                    <IconChevronDown size={12} stroke={2.25} />
+                  )}
+                </button>
+                {qualityOpen && canEditQuality && (
+                  <div className="rs-quality-menu" role="dialog" aria-label="Recording quality">
+                    <Select
+                      label="Resolution"
+                      value={resolution}
+                      onChange={(value) => void applyQuality({ resolution: value })}
+                      options={RESOLUTION_OPTIONS.map((o) => ({
+                        value: o.value,
+                        label: o.label,
+                        description: o.description,
+                      }))}
+                    />
+                    <Select
+                      label="Frame rate"
+                      value={String(fps)}
+                      onChange={(value) =>
+                        void applyQuality({ frameRate: Number(value) })
+                      }
+                      options={FRAME_RATE_OPTIONS.map((o) => ({
+                        value: o.value,
+                        label: o.label,
+                        description: o.description,
+                      }))}
+                    />
+                  </div>
+                )}
               </div>
               <button type="button" className="rs-effects-btn" title="Effects">
                 <IconSparkles size={14} stroke={2} />

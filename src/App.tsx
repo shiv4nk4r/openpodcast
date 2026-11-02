@@ -4,6 +4,7 @@ import CreateStudio from "./pages/CreateStudio";
 import Lobby from "./pages/Lobby";
 import Recording from "./pages/Recording";
 import Editor from "./pages/Editor";
+import Playback from "./pages/Playback";
 import Settings from "./pages/Settings";
 import Onboarding, { isOnboardingComplete } from "./pages/Onboarding";
 
@@ -72,6 +73,14 @@ export default function App() {
           element={
             <RequireOnboarded>
               <Editor />
+            </RequireOnboarded>
+          }
+        />
+        <Route
+          path="/playback/:id"
+          element={
+            <RequireOnboarded>
+              <Playback />
             </RequireOnboarded>
           }
         />

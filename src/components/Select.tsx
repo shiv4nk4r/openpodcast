@@ -7,11 +7,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import {
-  IconCheck,
-  IconChevronDown,
-  IconCircleFilled,
-} from "@tabler/icons-react";
+import { IconCheck, IconChevronDown } from "@tabler/icons-react";
 
 export interface SelectOption {
   value: string;
@@ -195,11 +191,7 @@ export function Select(props: Props) {
               >
                 <span className={`op-select-check ${isMulti(props) ? "is-multi" : ""}`}>
                   {selected ? (
-                    isMulti(props) ? (
-                      <IconCheck size={14} stroke={2.5} />
-                    ) : (
-                      <IconCircleFilled size={8} />
-                    )
+                    <IconCheck size={isMulti(props) ? 12 : 11} stroke={2.5} />
                   ) : null}
                 </span>
                 <span className="op-select-option-text">

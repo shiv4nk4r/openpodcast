@@ -152,6 +152,32 @@ fn get_invite(state: State<'_, Arc<AppState>>) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn update_studio_settings(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    settings: StudioSettings,
+) -> Result<StudioSettings, String> {
+    if let Some(host) = state.host.lock().as_mut() {
+        host.update_studio_settings(settings.clone());
+    }
+
+    let dir = paths::session_dir(&session_id)?;
+    let sync_path = dir.join("sync.json");
+    if sync_path.exists() {
+        let raw = std::fs::read_to_string(&sync_path).unwrap_or_default();
+        if let Ok(mut sync) = serde_json::from_str::<serde_json::Value>(&raw) {
+            sync["studio"] = serde_json::to_value(&settings).unwrap_or_default();
+            let _ = std::fs::write(
+                &sync_path,
+                serde_json::to_string_pretty(&sync).unwrap_or(raw),
+            );
+        }
+    }
+
+    Ok(settings)
+}
+
+#[tauri::command]
 fn list_peers(state: State<'_, Arc<AppState>>) -> Result<Vec<p2p::PeerInfo>, String> {
     Ok(state
         .host
@@ -271,6 +297,44 @@ fn save_video_track(
 }
 
 #[tauri::command]
+fn rename_session(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    name: String,
+) -> Result<SessionRecord, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Name cannot be empty".into());
+    }
+    state.db.rename_session(&session_id, trimmed)?;
+
+    // Keep sync.json studio name in sync when present
+    let sync_path = paths::session_dir(&session_id)?.join("sync.json");
+    if sync_path.exists() {
+        if let Ok(raw) = std::fs::read_to_string(&sync_path) {
+            if let Ok(mut sync) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if sync.get("studio").is_none() {
+                    sync["studio"] = serde_json::json!({});
+                }
+                if let Some(studio) = sync.get_mut("studio") {
+                    studio["name"] = serde_json::json!(trimmed);
+                }
+                sync["name"] = serde_json::json!(trimmed);
+                let _ = std::fs::write(
+                    &sync_path,
+                    serde_json::to_string_pretty(&sync).unwrap_or(raw),
+                );
+            }
+        }
+    }
+
+    state
+        .db
+        .get_session(&session_id)?
+        .ok_or_else(|| "Session not found".into())
+}
+
+#[tauri::command]
 fn finalize_session(
     state: State<'_, Arc<AppState>>,
     session_id: String,
@@ -299,16 +363,37 @@ fn finalize_session(
     std::fs::write(&sync_path, serde_json::to_string_pretty(&sync).unwrap())
         .map_err(|e| e.to_string())?;
 
+    let studio = sync.get("studio");
+    let studio_name = studio
+        .and_then(|s| s.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("Episode")
+        .to_string();
+    let studio_fps = studio
+        .and_then(|s| s.get("frame_rate"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30) as u32;
+    let studio_res = studio
+        .and_then(|s| s.get("resolution"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("1080p")
+        .to_string();
+    let studio_mode = match studio
+        .and_then(|s| s.get("mode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("audio_video")
+    {
+        "audio_only" => StudioMode::AudioOnly,
+        _ => StudioMode::AudioVideo,
+    };
+
     let existing = state.db.get_session(&session_id)?;
     let mut record = existing.unwrap_or(SessionRecord {
         id: session_id.clone(),
-        name: sync["studio"]["name"]
-            .as_str()
-            .unwrap_or("Episode")
-            .to_string(),
-        mode: StudioMode::AudioVideo,
-        frame_rate: 30,
-        resolution: "1080p".into(),
+        name: studio_name.clone(),
+        mode: studio_mode.clone(),
+        frame_rate: studio_fps,
+        resolution: studio_res.clone(),
         created_at: chrono::Utc::now(),
         duration_secs: 0.0,
         participants: vec![],
@@ -316,6 +401,12 @@ fn finalize_session(
         local_path: dir.to_string_lossy().to_string(),
         drive_uploaded: false,
     });
+    if record.name.trim().is_empty() || record.name == "Episode" {
+        record.name = studio_name;
+    }
+    record.mode = studio_mode;
+    record.frame_rate = studio_fps;
+    record.resolution = studio_res;
     record.duration_secs = duration_secs;
     record.participants = participants;
     record.local_path = dir.to_string_lossy().to_string();
@@ -777,8 +868,10 @@ pub fn run() {
             get_app_paths,
             list_sessions,
             get_session,
+            rename_session,
             create_studio,
             get_invite,
+            update_studio_settings,
             list_peers,
             admit_guest,
             decode_invite,

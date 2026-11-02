@@ -3,6 +3,10 @@ import { Link, useNavigate } from "react-router-dom";
 import { IconArrowLeft } from "@tabler/icons-react";
 import { api } from "../api";
 import { Segmented, Select } from "../components/Select";
+import {
+  FRAME_RATE_OPTIONS,
+  RESOLUTION_OPTIONS,
+} from "../lib/studioQuality";
 import { useApp } from "../state";
 import type { StudioMode } from "../types";
 
@@ -75,20 +79,21 @@ export default function CreateStudio() {
                 label="Frame rate"
                 value={frameRate}
                 onChange={setFrameRate}
-                options={[24, 25, 30, 60].map((f) => ({
-                  value: String(f),
-                  label: `${f} fps`,
-                  description: f === 30 ? "Default for most podcasts" : undefined,
+                options={FRAME_RATE_OPTIONS.map((o) => ({
+                  value: o.value,
+                  label: o.label,
+                  description: o.description,
                 }))}
               />
               <Select
                 label="Resolution"
                 value={resolution}
                 onChange={setResolution}
-                options={[
-                  { value: "720p", label: "720p", description: "Lighter files" },
-                  { value: "1080p", label: "1080p", description: "Recommended" },
-                ]}
+                options={RESOLUTION_OPTIONS.map((o) => ({
+                  value: o.value,
+                  label: o.label,
+                  description: o.description,
+                }))}
               />
             </>
           )}

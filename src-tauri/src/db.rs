@@ -155,6 +155,20 @@ impl Database {
             .find(|s| s.id == id))
     }
 
+    pub fn rename_session(&self, id: &str, name: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let updated = conn
+            .execute(
+                "UPDATE sessions SET name = ?1 WHERE id = ?2",
+                params![name, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if updated == 0 {
+            return Err("Session not found".into());
+        }
+        Ok(())
+    }
+
     pub fn mark_drive_uploaded(&self, id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
