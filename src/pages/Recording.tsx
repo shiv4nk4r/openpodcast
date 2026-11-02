@@ -760,7 +760,8 @@ export default function Recording() {
                   </div>
                   <h2>Invite people</h2>
                   <p>
-                    Share this invite so guests can join your lobby and enter the
+                    Share this invite so guests can join from any network. Both
+                    of you must stay online. Guests paste it in the lobby and enter the
                     studio.
                   </p>
                   <button

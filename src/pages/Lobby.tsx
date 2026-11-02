@@ -437,7 +437,7 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
               </button>
 
               <p className="rs-lobby-foot">
-                You are joining as a guest.{" "}
+                Works across networks — host and guest must both be online.{" "}
                 <button type="button" className="rs-link" onClick={showHostPanel}>
                   Back to host studio
                 </button>

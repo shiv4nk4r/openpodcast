@@ -43,9 +43,9 @@ export interface AppSettings {
 }
 
 export interface InviteTicket {
+  /** 2 = iroh cross-network. Version 1 was LAN-only TCP. */
   version: number;
-  host_addrs: string[];
-  port: number;
+  iroh_ticket: string;
   password: string;
   studio: StudioSettings;
   host_name: string;

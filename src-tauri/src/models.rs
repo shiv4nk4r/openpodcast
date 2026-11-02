@@ -92,9 +92,10 @@ impl Default for AppSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InviteTicket {
+    /// 2 = iroh (cross-network). Version 1 was LAN-only TCP.
     pub version: u8,
-    pub host_addrs: Vec<String>,
-    pub port: u16,
+    /// iroh `EndpointTicket` string (`endpoint…`) for dialing the host.
+    pub iroh_ticket: String,
     pub password: String,
     pub studio: StudioSettings,
     pub host_name: String,

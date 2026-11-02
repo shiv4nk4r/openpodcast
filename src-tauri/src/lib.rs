@@ -460,17 +460,16 @@ async fn join_studio(
     let draft = write_draft_sync(&state, &session_id, &sync)?;
     *state.active_session.lock() = Some(session_id.clone());
 
-    // Attempt connection (may fail if host unreachable — still return ticket info for UI)
-    let connected = p2p::join_studio(&ticket, display_name.clone(), participant_id.clone())
-        .await
-        .is_ok();
+    // Prove we can reach the host (registers the guest). Control/file channels reconnect as needed.
+    let _stream = p2p::join_studio(&ticket, display_name.clone(), participant_id.clone()).await?;
+    drop(_stream);
 
     Ok(serde_json::json!({
         "session_id": session_id,
         "participant_id": participant_id,
         "studio": ticket.studio,
         "host_name": ticket.host_name,
-        "connected": connected,
+        "connected": true,
         "draft_path": draft.to_string_lossy(),
     }))
 }

@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "PATH=\"$HOME/.cargo/bin:$PATH\" tauri"
   },
   "dependencies": {
     "@tabler/icons-react": "^3.50.0",

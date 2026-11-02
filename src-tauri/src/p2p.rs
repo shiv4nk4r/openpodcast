@@ -1,31 +1,35 @@
-//! Peer-to-peer studio networking without a hosted signaling server.
-//! Invite tickets carry dialing info (addrs + port + password + studio settings).
-//! Peers connect over TCP; on LAN this is direct. Public addresses are probed via
-//! a free STUN-like HTTP echo so remote guests can dial without our infrastructure.
+//! Peer-to-peer studio networking via iroh (QUIC + hole punching + public relays).
+//! Invite tickets carry an iroh endpoint ticket, studio password, and settings.
+//! Same-LAN uses a direct path; cross-network falls back to n0 relays.
 //!
-//! Protocol (length-prefixed JSON frames on TCP):
-//! - Hello { password, name, role }
-//! - Admit / Deny
-//! - PreviewAudio / PreviewJpeg (base64 chunks)
-//! - ClockSync { host_unix_ms }
-//! - RecordStart / RecordStop
+//! Protocol (length-prefixed JSON frames on a bi-directional QUIC stream):
+//! - Hello { password, name, participant_id }
+//! - Admit / Deny / Waiting
+//! - PreviewFrame, ClockSync, RecordStart / RecordStop
 //! - FileOffer / FileChunk / FileDone
-//! - Reaction { emoji }
-//! - Leave
+//! - Reaction, Leave, PeerList
 
 use crate::models::{InviteTicket, StudioSettings};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::Utc;
+use iroh::endpoint::presets;
+use iroh::{Endpoint, EndpointAddr};
+use iroh_tickets::endpoint::EndpointTicket;
 use parking_lot::Mutex;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// Application-Layer Protocol Negotiation for OpenPodcast studio sessions.
+pub const ALPN: &[u8] = b"openpodcast/1";
+
+const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -92,39 +96,46 @@ pub struct PeerInfo {
     pub admitted: bool,
 }
 
+/// Bi-directional peer session over iroh QUIC.
+pub struct PeerStream {
+    _endpoint: Endpoint,
+    _conn: iroh::endpoint::Connection,
+    send: iroh::endpoint::SendStream,
+    _recv: iroh::endpoint::RecvStream,
+}
+
 pub struct StudioHost {
     pub password: String,
-    pub port: u16,
     pub ticket: InviteTicket,
     pub peers: Arc<Mutex<HashMap<String, PeerInfo>>>,
+    endpoint: Endpoint,
     shutdown: Arc<Mutex<Option<mpsc::Sender<()>>>>,
 }
 
 impl StudioHost {
     pub async fn start(studio: StudioSettings, host_name: String) -> Result<Self, String> {
-        let listener = TcpListener::bind("0.0.0.0:0")
+        let endpoint = Endpoint::builder(presets::N0)
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
             .await
-            .map_err(|e| e.to_string())?;
-        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+            .map_err(|e| format!("Failed to start studio network: {e}"))?;
+
+        // Wait briefly for a relay registration so cross-network dials work.
+        let _ = tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online()).await;
+
         let password: String = rand::thread_rng()
             .sample_iter(&rand::distributions::Alphanumeric)
             .take(12)
             .map(char::from)
             .collect();
 
-        // Local interfaces only at start — never block lobby boot on WAN IP lookup.
-        let mut addrs = local_ipv4s();
-        if addrs.is_empty() {
-            addrs.push("127.0.0.1".into());
-        }
-
+        let iroh_ticket = EndpointTicket::new(endpoint.addr()).to_string();
         let ticket = InviteTicket {
-            version: 1,
-            host_addrs: addrs,
-            port,
+            version: 2,
+            iroh_ticket,
             password: password.clone(),
             studio,
-            host_name: host_name.clone(),
+            host_name,
             created_at: Utc::now(),
         };
 
@@ -132,19 +143,29 @@ impl StudioHost {
         let (tx, mut rx) = mpsc::channel::<()>(1);
         let peers_c = peers.clone();
         let password_c = password.clone();
+        let ep_accept = endpoint.clone();
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = rx.recv() => break,
-                    accept = listener.accept() => {
-                        if let Ok((stream, addr)) = accept {
-                            let peers = peers_c.clone();
-                            let password = password_c.clone();
-                            tokio::spawn(async move {
-                                let _ = handle_guest(stream, addr, password, peers).await;
-                            });
-                        }
+                    _ = rx.recv() => {
+                        ep_accept.close().await;
+                        break;
+                    }
+                    incoming = ep_accept.accept() => {
+                        let Some(connecting) = incoming else { break };
+                        let peers = peers_c.clone();
+                        let password = password_c.clone();
+                        tokio::spawn(async move {
+                            match connecting.await {
+                                Ok(conn) => {
+                                    let _ = handle_guest(conn, password, peers).await;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("guest connection failed: {e}");
+                                }
+                            }
+                        });
                     }
                 }
             }
@@ -152,15 +173,18 @@ impl StudioHost {
 
         Ok(Self {
             password,
-            port,
             ticket,
             peers,
+            endpoint,
             shutdown: Arc::new(Mutex::new(Some(tx))),
         })
     }
 
     pub fn encode_ticket(&self) -> Result<String, String> {
-        encode_ticket(&self.ticket)
+        let mut ticket = self.ticket.clone();
+        // Refresh dialing info (relay URL / direct addrs may have updated).
+        ticket.iroh_ticket = EndpointTicket::new(self.endpoint.addr()).to_string();
+        encode_ticket(&ticket)
     }
 
     pub fn update_studio_settings(&mut self, settings: StudioSettings) {
@@ -185,12 +209,16 @@ impl StudioHost {
 }
 
 async fn handle_guest(
-    mut stream: TcpStream,
-    _addr: SocketAddr,
+    conn: iroh::endpoint::Connection,
     password: String,
     peers: Arc<Mutex<HashMap<String, PeerInfo>>>,
 ) -> Result<(), String> {
-    let msg = read_frame(&mut stream).await?;
+    let (mut send, mut recv) = conn
+        .accept_bi()
+        .await
+        .map_err(|e| format!("accept stream: {e}"))?;
+
+    let msg = read_frame(&mut recv).await?;
     match msg {
         PeerMessage::Hello {
             password: pw,
@@ -199,7 +227,7 @@ async fn handle_guest(
         } => {
             if pw != password {
                 write_frame(
-                    &mut stream,
+                    &mut send,
                     &PeerMessage::Deny {
                         reason: "Invalid studio password".into(),
                     },
@@ -217,7 +245,7 @@ async fn handle_guest(
                 },
             );
             write_frame(
-                &mut stream,
+                &mut send,
                 &PeerMessage::Waiting {
                     participant_id: participant_id.clone(),
                     name,
@@ -225,7 +253,6 @@ async fn handle_guest(
             )
             .await?;
 
-            // Wait until admitted, then keep connection for control messages
             loop {
                 let admitted = peers
                     .lock()
@@ -234,7 +261,7 @@ async fn handle_guest(
                     .unwrap_or(false);
                 if admitted {
                     write_frame(
-                        &mut stream,
+                        &mut send,
                         &PeerMessage::Admit {
                             participant_id: participant_id.clone(),
                         },
@@ -242,12 +269,11 @@ async fn handle_guest(
                     .await?;
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
 
-            // Echo clock sync periodically and forward simple messages
             loop {
-                match read_frame(&mut stream).await {
+                match read_frame(&mut recv).await {
                     Ok(PeerMessage::Leave { .. }) => {
                         peers.lock().remove(&participant_id);
                         break;
@@ -258,7 +284,6 @@ async fn handle_guest(
                         size: _,
                         sha256: _,
                     }) => {
-                        // Host will receive chunks into session dir — handled by app layer
                         let _ = (participant_id, file_name);
                     }
                     Ok(_) => {}
@@ -278,27 +303,60 @@ pub async fn join_studio(
     ticket: &InviteTicket,
     name: String,
     participant_id: String,
-) -> Result<TcpStream, String> {
-    let mut last_err = "Could not connect".to_string();
-    for addr in &ticket.host_addrs {
-        let target = format!("{addr}:{}", ticket.port);
-        match TcpStream::connect(&target).await {
-            Ok(mut stream) => {
-                write_frame(
-                    &mut stream,
-                    &PeerMessage::Hello {
-                        password: ticket.password.clone(),
-                        name,
-                        participant_id,
-                    },
-                )
-                .await?;
-                return Ok(stream);
-            }
-            Err(e) => last_err = e.to_string(),
-        }
+) -> Result<PeerStream, String> {
+    if ticket.version != 2 || ticket.iroh_ticket.trim().is_empty() {
+        return Err(
+            "This invite is from an older OpenPodcast build (LAN-only). Both host and guest need the latest app for cross-network studios."
+                .into(),
+        );
     }
-    Err(last_err)
+
+    let addr = parse_iroh_addr(&ticket.iroh_ticket)?;
+    let endpoint = Endpoint::bind(presets::N0)
+        .await
+        .map_err(|e| format!("Failed to start guest network: {e}"))?;
+
+    let password = ticket.password.clone();
+    let connect = async {
+        let conn = endpoint
+            .connect(addr, ALPN)
+            .await
+            .map_err(|e| format!("Could not reach host: {e}"))?;
+        let (mut send, recv) = conn
+            .open_bi()
+            .await
+            .map_err(|e| format!("Could not open studio stream: {e}"))?;
+        write_frame(
+            &mut send,
+            &PeerMessage::Hello {
+                password,
+                name,
+                participant_id,
+            },
+        )
+        .await?;
+        Ok::<_, String>(PeerStream {
+            _endpoint: endpoint.clone(),
+            _conn: conn,
+            send,
+            _recv: recv,
+        })
+    };
+
+    match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(
+            "Timed out reaching the host. Both people must be online; try again or check firewalls."
+                .into(),
+        ),
+    }
+}
+
+fn parse_iroh_addr(s: &str) -> Result<EndpointAddr, String> {
+    let ticket = EndpointTicket::from_str(s.trim())
+        .map_err(|e| format!("Invalid iroh invite ticket: {e}"))?;
+    Ok(ticket.endpoint_addr().clone())
 }
 
 pub fn encode_ticket(ticket: &InviteTicket) -> Result<String, String> {
@@ -314,21 +372,40 @@ pub fn decode_ticket(s: &str) -> Result<InviteTicket, String> {
     let bytes = URL_SAFE_NO_PAD
         .decode(b64)
         .map_err(|e| format!("Invalid invite encoding: {e}"))?;
+
+    // Peek version before full deserialize so v1 tickets get a clear message.
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+        let version = v.get("version").and_then(|x| x.as_u64()).unwrap_or(1);
+        if version < 2 || v.get("iroh_ticket").and_then(|x| x.as_str()).unwrap_or("").is_empty()
+        {
+            return Err(
+                "This invite is from an older OpenPodcast build (LAN-only). Both host and guest need the latest app for cross-network studios."
+                    .into(),
+            );
+        }
+    }
+
     serde_json::from_slice(&bytes).map_err(|e| format!("Invalid invite payload: {e}"))
 }
 
-async fn write_frame(stream: &mut TcpStream, msg: &PeerMessage) -> Result<(), String> {
+async fn write_frame(
+    send: &mut iroh::endpoint::SendStream,
+    msg: &PeerMessage,
+) -> Result<(), String> {
     let data = serde_json::to_vec(msg).map_err(|e| e.to_string())?;
     let len = (data.len() as u32).to_be_bytes();
-    stream.write_all(&len).await.map_err(|e| e.to_string())?;
-    stream.write_all(&data).await.map_err(|e| e.to_string())?;
+    send.write_all(&len)
+        .await
+        .map_err(|e| e.to_string())?;
+    send.write_all(&data)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
-async fn read_frame(stream: &mut TcpStream) -> Result<PeerMessage, String> {
+async fn read_frame(recv: &mut iroh::endpoint::RecvStream) -> Result<PeerMessage, String> {
     let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
+    recv.read_exact(&mut len_buf)
         .await
         .map_err(|e| e.to_string())?;
     let len = u32::from_be_bytes(len_buf) as usize;
@@ -336,53 +413,14 @@ async fn read_frame(stream: &mut TcpStream) -> Result<PeerMessage, String> {
         return Err("Frame too large".into());
     }
     let mut buf = vec![0u8; len];
-    stream
-        .read_exact(&mut buf)
+    recv.read_exact(&mut buf)
         .await
         .map_err(|e| e.to_string())?;
     serde_json::from_slice(&buf).map_err(|e| e.to_string())
 }
 
-fn local_ipv4s() -> Vec<String> {
-    let mut out = Vec::new();
-    if let Ok(ifaces) = local_ip_fallback() {
-        out.extend(ifaces);
-    }
-    out
-}
-
-fn local_ip_fallback() -> Result<Vec<String>, String> {
-    // Bind UDP to a public DNS to discover the preferred outbound interface IP
-    use std::net::UdpSocket;
-    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
-    let _ = socket.connect("8.8.8.8:80");
-    let addr = socket.local_addr().map_err(|e| e.to_string())?;
-    Ok(vec![addr.ip().to_string()])
-}
-
-#[allow(dead_code)]
-async fn discover_public_ip() -> Result<String, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let ip = client
-        .get("https://api.ipify.org")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .text()
-        .await
-        .map_err(|e| e.to_string())?;
-    let ip = ip.trim().to_string();
-    if ip.is_empty() {
-        return Err("empty".into());
-    }
-    Ok(ip)
-}
-
 pub async fn send_file(
-    stream: &mut TcpStream,
+    stream: &mut PeerStream,
     participant_id: &str,
     path: &PathBuf,
 ) -> Result<(), String> {
@@ -397,7 +435,7 @@ pub async fn send_file(
         .unwrap_or("track.bin")
         .to_string();
     write_frame(
-        stream,
+        &mut stream.send,
         &PeerMessage::FileOffer {
             participant_id: participant_id.into(),
             file_name: file_name.clone(),
@@ -410,7 +448,7 @@ pub async fn send_file(
     for (i, chunk) in data.chunks(CHUNK).enumerate() {
         let offset = (i * CHUNK) as u64;
         write_frame(
-            stream,
+            &mut stream.send,
             &PeerMessage::FileChunk {
                 file_name: file_name.clone(),
                 offset,
@@ -420,11 +458,71 @@ pub async fn send_file(
         .await?;
     }
     write_frame(
-        stream,
+        &mut stream.send,
         &PeerMessage::FileDone {
             file_name: file_name.clone(),
         },
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::StudioSettings;
+
+    #[test]
+    fn rejects_v1_lan_ticket() {
+        let v1 = serde_json::json!({
+            "version": 1,
+            "host_addrs": ["192.168.0.1"],
+            "port": 1234,
+            "password": "x",
+            "studio": {
+                "name": "T",
+                "mode": "audio_video",
+                "frame_rate": 30,
+                "resolution": "1080p"
+            },
+            "host_name": "Host",
+            "created_at": "2026-11-02T00:00:00Z"
+        });
+        let enc = format!(
+            "opcast_{}",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&v1).unwrap())
+        );
+        let err = decode_ticket(&enc).unwrap_err();
+        assert!(err.contains("older OpenPodcast"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn host_guest_iroh_hello() {
+        let studio = StudioSettings {
+            name: "Test".into(),
+            mode: crate::models::StudioMode::AudioVideo,
+            frame_rate: 30,
+            resolution: "1080p".into(),
+        };
+        let host = StudioHost::start(studio, "Host".into())
+            .await
+            .expect("host start");
+        let invite = host.encode_ticket().expect("encode");
+        let ticket = decode_ticket(&invite).expect("decode");
+        assert_eq!(ticket.version, 2);
+        assert!(!ticket.iroh_ticket.is_empty());
+
+        let stream = join_studio(&ticket, "Guest".into(), "guest-1".into())
+            .await
+            .expect("guest join");
+        // Give host accept loop a moment to register the peer
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let peers = host.peer_list();
+        assert!(
+            peers.iter().any(|p| p.id == "guest-1"),
+            "expected guest in peer list: {peers:?}"
+        );
+        drop(stream);
+        host.shutdown();
+    }
 }
