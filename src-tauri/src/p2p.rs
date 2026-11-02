@@ -119,24 +119,31 @@ pub struct PeerStream {
 }
 
 /// Keeps the guest↔host QUIC session alive after join (Waiting / Admit).
+/// Video (JPEG) and audio (PCM) use separate bi-streams so camera frames
+/// cannot stall microphone packets.
 pub struct GuestSession {
     _endpoint: Endpoint,
     _conn: iroh::endpoint::Connection,
-    send: GuestSend,
-    reader: Option<tokio::task::JoinHandle<()>>,
+    video_send: GuestSend,
+    audio_send: GuestSend,
+    readers: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for GuestSession {
     fn drop(&mut self) {
-        if let Some(h) = self.reader.take() {
+        for h in self.readers.drain(..) {
             h.abort();
         }
     }
 }
 
 impl GuestSession {
-    pub fn send_handle(&self) -> GuestSend {
-        self.send.clone()
+    pub fn video_send_handle(&self) -> GuestSend {
+        self.video_send.clone()
+    }
+
+    pub fn audio_send_handle(&self) -> GuestSend {
+        self.audio_send.clone()
     }
 }
 
@@ -159,16 +166,17 @@ pub async fn send_preview_on(
 }
 
 impl PeerStream {
-    /// Hold the connection open; forward host preview/admit frames to the UI bus.
-    pub fn hold_open(self, preview_tx: PreviewBus) -> GuestSession {
+    /// Hold the connection open; open a dedicated audio stream; forward frames to UI.
+    pub async fn hold_open(self, preview_tx: PreviewBus) -> Result<GuestSession, String> {
         let PeerStream {
             _endpoint,
             _conn,
             send,
             mut recv,
         } = self;
-        let send = Arc::new(tokio::sync::Mutex::new(send));
-        let reader = tokio::spawn(async move {
+        let video_send = Arc::new(tokio::sync::Mutex::new(send));
+        let preview_video = preview_tx.clone();
+        let video_reader = tokio::spawn(async move {
             loop {
                 match read_frame(&mut recv).await {
                     Ok(PeerMessage::PreviewFrame {
@@ -176,14 +184,14 @@ impl PeerStream {
                         jpeg_b64,
                         pcm_b64,
                     }) => {
-                        let _ = preview_tx.send(PreviewEvent {
+                        let _ = preview_video.send(PreviewEvent {
                             participant_id,
                             jpeg_b64,
                             pcm_b64,
                         });
                     }
                     Ok(PeerMessage::Admit { participant_id }) => {
-                        let _ = preview_tx.send(PreviewEvent {
+                        let _ = preview_video.send(PreviewEvent {
                             participant_id: format!("__admit__:{participant_id}"),
                             jpeg_b64: None,
                             pcm_b64: None,
@@ -194,12 +202,41 @@ impl PeerStream {
                 }
             }
         });
-        GuestSession {
+
+        // Dedicated audio bi-stream (host accept_bi runs during Waiting/Admit).
+        let (audio_send_raw, mut audio_recv) = _conn
+            .open_bi()
+            .await
+            .map_err(|e| format!("Could not open audio stream: {e}"))?;
+        let audio_send = Arc::new(tokio::sync::Mutex::new(audio_send_raw));
+        let preview_audio = preview_tx;
+        let audio_reader = tokio::spawn(async move {
+            loop {
+                match read_frame(&mut audio_recv).await {
+                    Ok(PeerMessage::PreviewFrame {
+                        participant_id,
+                        jpeg_b64,
+                        pcm_b64,
+                    }) => {
+                        let _ = preview_audio.send(PreviewEvent {
+                            participant_id,
+                            jpeg_b64,
+                            pcm_b64,
+                        });
+                    }
+                    Ok(PeerMessage::Leave { .. }) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+
+        Ok(GuestSession {
             _endpoint,
             _conn,
-            send,
-            reader: Some(reader),
-        }
+            video_send,
+            audio_send,
+            readers: vec![video_reader, audio_reader],
+        })
     }
 }
 
@@ -211,7 +248,8 @@ pub struct StudioHost {
     shutdown: Arc<Mutex<Option<mpsc::Sender<()>>>>,
     /// Shared with the accept loop so renamed hosts show up for new joiners.
     live_host_name: Arc<Mutex<String>>,
-    guest_sends: Arc<Mutex<HashMap<String, GuestSend>>>,
+    guest_video_sends: Arc<Mutex<HashMap<String, GuestSend>>>,
+    guest_audio_sends: Arc<Mutex<HashMap<String, GuestSend>>>,
     _preview_tx: PreviewBus,
 }
 
@@ -265,10 +303,12 @@ impl StudioHost {
         };
 
         let peers = Arc::new(Mutex::new(HashMap::new()));
-        let guest_sends = Arc::new(Mutex::new(HashMap::new()));
+        let guest_video_sends = Arc::new(Mutex::new(HashMap::new()));
+        let guest_audio_sends = Arc::new(Mutex::new(HashMap::new()));
         let (tx, mut rx) = mpsc::channel::<()>(1);
         let peers_c = peers.clone();
-        let guest_sends_c = guest_sends.clone();
+        let guest_video_c = guest_video_sends.clone();
+        let guest_audio_c = guest_audio_sends.clone();
         let password_c = password.clone();
         let host_name_c = Arc::new(Mutex::new(host_name));
         let host_name_accept = host_name_c.clone();
@@ -294,12 +334,12 @@ impl StudioHost {
                     incoming = ep_accept.accept() => {
                         let Some(incoming) = incoming else { break };
                         let peers = peers_c.clone();
-                        let guest_sends = guest_sends_c.clone();
+                        let guest_video_sends = guest_video_c.clone();
+                        let guest_audio_sends = guest_audio_c.clone();
                         let password = password_c.clone();
                         let host_name = host_name_accept.lock().clone();
                         let preview_tx = preview_tx_c.clone();
                         tokio::spawn(async move {
-                            // Explicit accept so handshake errors are logged clearly.
                             let accepting = match incoming.accept() {
                                 Ok(a) => a,
                                 Err(e) => {
@@ -314,7 +354,8 @@ impl StudioHost {
                                         password,
                                         host_name,
                                         peers,
-                                        guest_sends,
+                                        guest_video_sends,
+                                        guest_audio_sends,
                                         preview_tx,
                                     )
                                     .await
@@ -339,7 +380,8 @@ impl StudioHost {
             endpoint,
             shutdown: Arc::new(Mutex::new(Some(tx))),
             live_host_name: host_name_c,
-            guest_sends,
+            guest_video_sends,
+            guest_audio_sends,
             _preview_tx: preview_tx,
         })
     }
@@ -374,24 +416,20 @@ impl StudioHost {
         self.peers.lock().values().cloned().collect()
     }
 
-    pub fn guest_send_handles(&self) -> Vec<GuestSend> {
-        self.guest_sends.lock().values().cloned().collect()
+    pub fn guest_video_handles(&self) -> Vec<GuestSend> {
+        self.guest_video_sends.lock().values().cloned().collect()
     }
 
-    pub async fn send_preview_to_guests(
-        &self,
-        participant_id: String,
-        jpeg_b64: Option<String>,
-        pcm_b64: Option<String>,
-    ) -> Result<(), String> {
-        fanout_preview(self.guest_send_handles(), participant_id, jpeg_b64, pcm_b64).await
+    pub fn guest_audio_handles(&self) -> Vec<GuestSend> {
+        self.guest_audio_sends.lock().values().cloned().collect()
     }
 
     pub fn shutdown(&self) {
         if let Some(tx) = self.shutdown.lock().take() {
             let _ = tx.try_send(());
         }
-        self.guest_sends.lock().clear();
+        self.guest_video_sends.lock().clear();
+        self.guest_audio_sends.lock().clear();
     }
 }
 
@@ -400,7 +438,8 @@ async fn handle_guest(
     password: String,
     host_name: String,
     peers: Arc<Mutex<HashMap<String, PeerInfo>>>,
-    guest_sends: Arc<Mutex<HashMap<String, GuestSend>>>,
+    guest_video_sends: Arc<Mutex<HashMap<String, GuestSend>>>,
+    guest_audio_sends: Arc<Mutex<HashMap<String, GuestSend>>>,
     preview_tx: PreviewBus,
 ) -> Result<(), String> {
     let (send, mut recv) = conn
@@ -439,7 +478,7 @@ async fn handle_guest(
                     admitted: false,
                 },
             );
-            guest_sends
+            guest_video_sends
                 .lock()
                 .insert(participant_id.clone(), send.clone());
             {
@@ -455,13 +494,19 @@ async fn handle_guest(
                 .await?;
             }
 
+            // Accept the dedicated audio bi-stream while waiting for Admit.
+            let mut audio_accept = Box::pin(conn.accept_bi());
+            let mut audio_pair: Option<(
+                iroh::endpoint::SendStream,
+                iroh::endpoint::RecvStream,
+            )> = None;
             loop {
                 let admitted = peers
                     .lock()
                     .get(&participant_id)
                     .map(|p| p.admitted)
                     .unwrap_or(false);
-                if admitted {
+                if admitted && audio_pair.is_some() {
                     let mut s = send.lock().await;
                     write_frame(
                         &mut s,
@@ -472,14 +517,60 @@ async fn handle_guest(
                     .await?;
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                tokio::select! {
+                    res = &mut audio_accept, if audio_pair.is_none() => {
+                        match res {
+                            Ok(pair) => audio_pair = Some(pair),
+                            Err(e) => return Err(format!("accept audio stream: {e}")),
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
             }
+
+            let (audio_send_raw, mut audio_recv) = audio_pair
+                .ok_or_else(|| "Guest never opened an audio stream".to_string())?;
+            let audio_send = Arc::new(tokio::sync::Mutex::new(audio_send_raw));
+            guest_audio_sends
+                .lock()
+                .insert(participant_id.clone(), audio_send);
+
+            let preview_audio = preview_tx.clone();
+            let audio_pid = participant_id.clone();
+            let peers_audio = peers.clone();
+            let video_map = guest_video_sends.clone();
+            let audio_map = guest_audio_sends.clone();
+            let audio_reader = tokio::spawn(async move {
+                loop {
+                    match read_frame(&mut audio_recv).await {
+                        Ok(PeerMessage::PreviewFrame {
+                            participant_id: pid,
+                            jpeg_b64,
+                            pcm_b64,
+                        }) => {
+                            let _ = preview_audio.send(PreviewEvent {
+                                participant_id: pid,
+                                jpeg_b64,
+                                pcm_b64,
+                            });
+                        }
+                        Ok(PeerMessage::Leave { .. }) | Err(_) => {
+                            peers_audio.lock().remove(&audio_pid);
+                            video_map.lock().remove(&audio_pid);
+                            audio_map.lock().remove(&audio_pid);
+                            break;
+                        }
+                        Ok(_) => {}
+                    }
+                }
+            });
 
             loop {
                 match read_frame(&mut recv).await {
                     Ok(PeerMessage::Leave { .. }) => {
                         peers.lock().remove(&participant_id);
-                        guest_sends.lock().remove(&participant_id);
+                        guest_video_sends.lock().remove(&participant_id);
+                        guest_audio_sends.lock().remove(&participant_id);
                         break;
                     }
                     Ok(PeerMessage::PreviewFrame {
@@ -504,11 +595,13 @@ async fn handle_guest(
                     Ok(_) => {}
                     Err(_) => {
                         peers.lock().remove(&participant_id);
-                        guest_sends.lock().remove(&participant_id);
+                        guest_video_sends.lock().remove(&participant_id);
+                        guest_audio_sends.lock().remove(&participant_id);
                         break;
                     }
                 }
             }
+            audio_reader.abort();
         }
         _ => {}
     }
@@ -796,7 +889,10 @@ mod tests {
             peers.iter().any(|p| p.id == "guest-1" && !p.admitted),
             "expected waiting guest in peer list: {peers:?}"
         );
-        let _session = stream.hold_open(preview_tx);
+        let _session = stream
+            .hold_open(preview_tx)
+            .await
+            .expect("hold open");
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(
             host.peer_list().iter().any(|p| p.id == "guest-1"),

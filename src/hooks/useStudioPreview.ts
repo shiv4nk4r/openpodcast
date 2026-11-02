@@ -8,18 +8,17 @@ type PreviewEvent = {
   pcm_b64?: string | null;
 };
 
-/** Small frames @ higher rate — big JPEGs were blocking audio on the same QUIC stream. */
 const TARGET_W = 320;
 const TARGET_H = 180;
 const JPEG_QUALITY = 0.42;
 const VIDEO_FPS = 12;
 const PCM_RATE = 16000;
-/** How often we flush queued mic PCM (ms). */
-const AUDIO_FLUSH_MS = 40;
-/** Start playback this far ahead to absorb jitter. */
-const AUDIO_PREROLL_S = 0.08;
-/** If playout falls this far behind wall clock, snap forward (drop backlog). */
-const AUDIO_MAX_LAG_S = 0.35;
+/** Flush mic PCM often; audio rides its own QUIC stream. */
+const AUDIO_FLUSH_MS = 30;
+/** Target buffered audio before we start draining (~120ms). */
+const JITTER_TARGET_SAMPLES = Math.round(PCM_RATE * 0.12);
+/** Soft cap — drop oldest if a stall balloons the buffer (~400ms). */
+const JITTER_MAX_SAMPLES = Math.round(PCM_RATE * 0.4);
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -49,7 +48,6 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
   return out;
 }
 
-/** Downsample Float32 → Int16 LE mono @ 16kHz with linear interpolation. */
 function encodePcm16k(input: Float32Array, inputRate: number): Uint8Array {
   if (input.length === 0) return new Uint8Array();
   const outLen = Math.max(1, Math.round((input.length * PCM_RATE) / inputRate));
@@ -67,9 +65,60 @@ function encodePcm16k(input: Float32Array, inputRate: number): Uint8Array {
   return new Uint8Array(out.buffer);
 }
 
+/** Continuous float ring — ScriptProcessor pulls this; underruns are silence, not gaps. */
+class PcmRing {
+  private buf: Float32Array;
+  private r = 0;
+  private w = 0;
+  private n = 0;
+  started = false;
+
+  constructor(capacity: number) {
+    this.buf = new Float32Array(capacity);
+  }
+
+  get length() {
+    return this.n;
+  }
+
+  push(samples: Float32Array) {
+    for (let i = 0; i < samples.length; i++) {
+      if (this.n >= this.buf.length) {
+        // Drop oldest sample to keep latency bounded.
+        this.r = (this.r + 1) % this.buf.length;
+        this.n--;
+      }
+      this.buf[this.w] = samples[i];
+      this.w = (this.w + 1) % this.buf.length;
+      this.n++;
+    }
+    if (!this.started && this.n >= JITTER_TARGET_SAMPLES) {
+      this.started = true;
+    }
+  }
+
+  /** Fill `out` from the ring; pad with 0 on underrun (keeps the clock continuous). */
+  pull(out: Float32Array) {
+    if (!this.started) {
+      out.fill(0);
+      return;
+    }
+    for (let i = 0; i < out.length; i++) {
+      if (this.n > 0) {
+        out[i] = this.buf[this.r];
+        this.r = (this.r + 1) % this.buf.length;
+        this.n--;
+      } else {
+        // Soft underrun: silence sample, do NOT stop the player (avoids audible "breaks").
+        out[i] = 0;
+      }
+    }
+  }
+}
+
 /**
- * Live studio preview over iroh PreviewFrame.
- * Audio and video are queued/flushed separately so JPEG writes don't starve mic PCM.
+ * Live studio preview: audio on its own QUIC stream + ring-buffer playout
+ * so brief network jitter becomes silence padding instead of broken speech.
  */
 export function useStudioPreview(opts: {
   active: boolean;
@@ -82,18 +131,44 @@ export function useStudioPreview(opts: {
   micOn: boolean;
 }) {
   const [admitted, setAdmitted] = useState(false);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const playTimeRef = useRef(0);
+  const ringRef = useRef<PcmRing | null>(null);
+  const playCtxRef = useRef<AudioContext | null>(null);
   const sendEnabled =
     opts.role === "host" ? opts.hostHasAdmittedGuest : admitted;
 
-  // ---- receive: admit + audio (video paints via RemotePeerVideo) ----
+  // ---- receive: admit + push PCM into continuous ring ----
   useEffect(() => {
     if (!opts.active) {
       setAdmitted(false);
-      playTimeRef.current = 0;
+      ringRef.current = null;
       return;
     }
+
+    const ring = new PcmRing(JITTER_MAX_SAMPLES);
+    ringRef.current = ring;
+
+    let playCtx: AudioContext | null = null;
+    let playProc: ScriptProcessorNode | null = null;
+    let playGain: GainNode | null = null;
+
+    try {
+      playCtx = new AudioContext({ sampleRate: PCM_RATE });
+      playCtxRef.current = playCtx;
+      void playCtx.resume();
+      // 1024 @ 16kHz ≈ 64ms callback — smooth pull from the jitter ring.
+      playProc = playCtx.createScriptProcessor(1024, 1, 1);
+      playProc.onaudioprocess = (e) => {
+        const out = e.outputBuffer.getChannelData(0);
+        ring.pull(out);
+      };
+      playGain = playCtx.createGain();
+      playGain.gain.value = 1;
+      playProc.connect(playGain);
+      playGain.connect(playCtx.destination);
+    } catch {
+      /* playback optional */
+    }
+
     let unlisten: UnlistenFn | undefined;
     void (async () => {
       try {
@@ -105,55 +180,38 @@ export function useStudioPreview(opts: {
             return;
           }
           if (p.participant_id === opts.participantId) return;
-          if (p.pcm_b64) playPcm(p.pcm_b64);
+          if (!p.pcm_b64) return;
+          const bytes = b64ToBytes(p.pcm_b64);
+          if (bytes.byteLength < 2) return;
+          const samples = new Int16Array(
+            bytes.buffer,
+            bytes.byteOffset,
+            Math.floor(bytes.byteLength / 2),
+          );
+          const f32 = new Float32Array(samples.length);
+          for (let i = 0; i < samples.length; i++) f32[i] = samples[i] / 0x8000;
+          ring.push(f32);
         });
       } catch {
         /* browser preview without Tauri */
       }
     })();
+
     return () => {
       unlisten?.();
+      try {
+        playProc?.disconnect();
+        playGain?.disconnect();
+      } catch {
+        /* ignore */
+      }
+      void playCtx?.close().catch(() => undefined);
+      if (playCtxRef.current === playCtx) playCtxRef.current = null;
+      ringRef.current = null;
     };
   }, [opts.active, opts.participantId]);
 
-  function playPcm(b64: string) {
-    try {
-      const ctx =
-        audioCtxRef.current ??
-        new AudioContext({ sampleRate: PCM_RATE });
-      audioCtxRef.current = ctx;
-      if (ctx.state === "suspended") void ctx.resume();
-      const bytes = b64ToBytes(b64);
-      if (bytes.byteLength < 2) return;
-      const samples = new Int16Array(
-        bytes.buffer,
-        bytes.byteOffset,
-        Math.floor(bytes.byteLength / 2),
-      );
-      const f32 = new Float32Array(samples.length);
-      for (let i = 0; i < samples.length; i++) f32[i] = samples[i] / 0x8000;
-      const buf = ctx.createBuffer(1, f32.length, PCM_RATE);
-      buf.copyToChannel(f32, 0);
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
-      src.connect(ctx.destination);
-
-      const now = ctx.currentTime;
-      // Underrun: schedule with preroll. Overrun: snap forward so delay doesn't grow.
-      if (playTimeRef.current < now + 0.02) {
-        playTimeRef.current = now + AUDIO_PREROLL_S;
-      } else if (playTimeRef.current - now > AUDIO_MAX_LAG_S) {
-        playTimeRef.current = now + AUDIO_PREROLL_S;
-      }
-      const startAt = playTimeRef.current;
-      src.start(startAt);
-      playTimeRef.current = startAt + buf.duration;
-    } catch {
-      /* ignore decode glitches */
-    }
-  }
-
-  // ---- send: separate audio queue + video, single serialized pump ----
+  // ---- send: independent audio + video pumps (separate QUIC streams) ----
   useEffect(() => {
     if (!opts.active || !sendEnabled) return;
     let cancelled = false;
@@ -165,36 +223,43 @@ export function useStudioPreview(opts: {
 
     const pcmQueue: Uint8Array[] = [];
     let latestJpeg: string | null = null;
-    let pumping = false;
+    let audioPumping = false;
+    let videoPumping = false;
 
-    const pump = async () => {
-      if (pumping || cancelled) return;
-      pumping = true;
+    const pumpAudio = async () => {
+      if (audioPumping || cancelled) return;
+      audioPumping = true;
       try {
-        while (!cancelled) {
-          const pcmChunks = pcmQueue.splice(0, pcmQueue.length);
-          const jpeg = latestJpeg;
-          latestJpeg = null;
-          if (!pcmChunks.length && !jpeg) break;
-
-          // Prefer shipping audio first so mic isn't stuck behind a JPEG.
-          if (pcmChunks.length) {
-            const pcm = concatBytes(pcmChunks);
-            await api.sendPreviewFrame(
-              opts.participantId,
-              undefined,
-              bytesToB64(pcm),
-            );
-          }
-          if (jpeg) {
-            await api.sendPreviewFrame(opts.participantId, jpeg, undefined);
-          }
+        while (!cancelled && pcmQueue.length) {
+          const pcm = concatBytes(pcmQueue.splice(0, pcmQueue.length));
+          await api.sendPreviewFrame(
+            opts.participantId,
+            undefined,
+            bytesToB64(pcm),
+          );
         }
       } catch {
         /* drop on backpressure */
       } finally {
-        pumping = false;
-        if (!cancelled && (pcmQueue.length || latestJpeg)) void pump();
+        audioPumping = false;
+        if (!cancelled && pcmQueue.length) void pumpAudio();
+      }
+    };
+
+    const pumpVideo = async () => {
+      if (videoPumping || cancelled) return;
+      videoPumping = true;
+      try {
+        while (!cancelled && latestJpeg) {
+          const jpeg = latestJpeg;
+          latestJpeg = null;
+          await api.sendPreviewFrame(opts.participantId, jpeg, undefined);
+        }
+      } catch {
+        /* drop on backpressure */
+      } finally {
+        videoPumping = false;
+        if (!cancelled && latestJpeg) void pumpVideo();
       }
     };
 
@@ -209,7 +274,6 @@ export function useStudioPreview(opts: {
         audioCtx = new AudioContext();
         void audioCtx.resume();
         source = audioCtx.createMediaStreamSource(stream);
-        // 2048 @ 48k ≈ 43ms — close to AUDIO_FLUSH_MS for steadier packets.
         processor = audioCtx.createScriptProcessor(2048, 1, 1);
         processor.onaudioprocess = (e) => {
           if (!opts.micOn || cancelled) return;
@@ -217,8 +281,8 @@ export function useStudioPreview(opts: {
           const pcm = encodePcm16k(input, audioCtx?.sampleRate || 48000);
           if (!pcm.length) return;
           pcmQueue.push(pcm);
-          // Cap queue (~0.5s) so a stalled send doesn't explode memory.
-          while (pcmQueue.length > 12) pcmQueue.shift();
+          // ~0.6s cap
+          while (pcmQueue.length > 16) pcmQueue.shift();
         };
         source.connect(processor);
         const mute = audioCtx.createGain();
@@ -226,13 +290,13 @@ export function useStudioPreview(opts: {
         processor.connect(mute);
         mute.connect(audioCtx.destination);
       } catch {
-        /* audio capture optional */
+        /* capture optional */
       }
     };
     attachAudio();
 
     const audioFlushId = window.setInterval(() => {
-      if (pcmQueue.length) void pump();
+      if (pcmQueue.length) void pumpAudio();
     }, AUDIO_FLUSH_MS);
 
     const videoId = window.setInterval(() => {
@@ -250,10 +314,10 @@ export function useStudioPreview(opts: {
       ctx2d.fillStyle = "#111";
       ctx2d.fillRect(0, 0, TARGET_W, TARGET_H);
       ctx2d.drawImage(video, dx, dy, dw, dh);
-      const dataUrl = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
-      // Keep only the newest frame — old ones aren't worth sending late.
-      latestJpeg = dataUrl.replace(/^data:image\/jpeg;base64,/, "");
-      void pump();
+      latestJpeg = canvas
+        .toDataURL("image/jpeg", JPEG_QUALITY)
+        .replace(/^data:image\/jpeg;base64,/, "");
+      void pumpVideo();
     }, 1000 / VIDEO_FPS);
 
     return () => {
@@ -277,13 +341,6 @@ export function useStudioPreview(opts: {
     opts.getVideoEl,
     opts.getStream,
   ]);
-
-  useEffect(() => {
-    return () => {
-      void audioCtxRef.current?.close().catch(() => undefined);
-      audioCtxRef.current = null;
-    };
-  }, []);
 
   return { admitted };
 }
