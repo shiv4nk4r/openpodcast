@@ -99,6 +99,17 @@ pub struct PeerInfo {
     pub admitted: bool,
 }
 
+/// Live studio preview payload pushed to the UI over a broadcast bus.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewEvent {
+    pub participant_id: String,
+    pub jpeg_b64: Option<String>,
+    pub pcm_b64: Option<String>,
+}
+
+pub type PreviewBus = tokio::sync::broadcast::Sender<PreviewEvent>;
+pub type GuestSend = Arc<tokio::sync::Mutex<iroh::endpoint::SendStream>>;
+
 /// Bi-directional peer session over iroh QUIC.
 pub struct PeerStream {
     _endpoint: Endpoint,
@@ -111,7 +122,7 @@ pub struct PeerStream {
 pub struct GuestSession {
     _endpoint: Endpoint,
     _conn: iroh::endpoint::Connection,
-    _send: iroh::endpoint::SendStream,
+    send: GuestSend,
     reader: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -123,18 +134,57 @@ impl Drop for GuestSession {
     }
 }
 
+impl GuestSession {
+    pub async fn send_preview(
+        &self,
+        participant_id: String,
+        jpeg_b64: Option<String>,
+        pcm_b64: Option<String>,
+    ) -> Result<(), String> {
+        let mut send = self.send.lock().await;
+        write_frame(
+            &mut send,
+            &PeerMessage::PreviewFrame {
+                participant_id,
+                jpeg_b64,
+                pcm_b64,
+            },
+        )
+        .await
+    }
+}
+
 impl PeerStream {
-    /// Hold the connection open and drain host frames so Admit is not stuck unread.
-    pub fn hold_open(self) -> GuestSession {
+    /// Hold the connection open; forward host preview/admit frames to the UI bus.
+    pub fn hold_open(self, preview_tx: PreviewBus) -> GuestSession {
         let PeerStream {
             _endpoint,
             _conn,
             send,
             mut recv,
         } = self;
+        let send = Arc::new(tokio::sync::Mutex::new(send));
         let reader = tokio::spawn(async move {
             loop {
                 match read_frame(&mut recv).await {
+                    Ok(PeerMessage::PreviewFrame {
+                        participant_id,
+                        jpeg_b64,
+                        pcm_b64,
+                    }) => {
+                        let _ = preview_tx.send(PreviewEvent {
+                            participant_id,
+                            jpeg_b64,
+                            pcm_b64,
+                        });
+                    }
+                    Ok(PeerMessage::Admit { participant_id }) => {
+                        let _ = preview_tx.send(PreviewEvent {
+                            participant_id: format!("__admit__:{participant_id}"),
+                            jpeg_b64: None,
+                            pcm_b64: None,
+                        });
+                    }
                     Ok(PeerMessage::Leave { .. }) | Err(_) => break,
                     Ok(_) => {}
                 }
@@ -143,7 +193,7 @@ impl PeerStream {
         GuestSession {
             _endpoint,
             _conn,
-            _send: send,
+            send,
             reader: Some(reader),
         }
     }
@@ -157,6 +207,8 @@ pub struct StudioHost {
     shutdown: Arc<Mutex<Option<mpsc::Sender<()>>>>,
     /// Shared with the accept loop so renamed hosts show up for new joiners.
     live_host_name: Arc<Mutex<String>>,
+    guest_sends: Arc<Mutex<HashMap<String, GuestSend>>>,
+    _preview_tx: PreviewBus,
 }
 
 /// Wait until the endpoint has a relay URL (required for cross-network dials).
@@ -179,7 +231,11 @@ pub async fn wait_until_dialable(endpoint: &Endpoint) -> Result<(), String> {
 }
 
 impl StudioHost {
-    pub async fn start(studio: StudioSettings, host_name: String) -> Result<Self, String> {
+    pub async fn start(
+        studio: StudioSettings,
+        host_name: String,
+        preview_tx: PreviewBus,
+    ) -> Result<Self, String> {
         let endpoint = Endpoint::builder(presets::N0)
             .alpns(vec![ALPN.to_vec()])
             .bind()
@@ -205,11 +261,14 @@ impl StudioHost {
         };
 
         let peers = Arc::new(Mutex::new(HashMap::new()));
+        let guest_sends = Arc::new(Mutex::new(HashMap::new()));
         let (tx, mut rx) = mpsc::channel::<()>(1);
         let peers_c = peers.clone();
+        let guest_sends_c = guest_sends.clone();
         let password_c = password.clone();
         let host_name_c = Arc::new(Mutex::new(host_name));
         let host_name_accept = host_name_c.clone();
+        let preview_tx_c = preview_tx.clone();
         let ep_accept = endpoint.clone();
         let ep_keepalive = endpoint.clone();
 
@@ -231,8 +290,10 @@ impl StudioHost {
                     incoming = ep_accept.accept() => {
                         let Some(incoming) = incoming else { break };
                         let peers = peers_c.clone();
+                        let guest_sends = guest_sends_c.clone();
                         let password = password_c.clone();
                         let host_name = host_name_accept.lock().clone();
+                        let preview_tx = preview_tx_c.clone();
                         tokio::spawn(async move {
                             // Explicit accept so handshake errors are logged clearly.
                             let accepting = match incoming.accept() {
@@ -244,8 +305,15 @@ impl StudioHost {
                             };
                             match accepting.await {
                                 Ok(conn) => {
-                                    if let Err(e) =
-                                        handle_guest(conn, password, host_name, peers).await
+                                    if let Err(e) = handle_guest(
+                                        conn,
+                                        password,
+                                        host_name,
+                                        peers,
+                                        guest_sends,
+                                        preview_tx,
+                                    )
+                                    .await
                                     {
                                         tracing::warn!("guest session ended: {e}");
                                     }
@@ -267,6 +335,8 @@ impl StudioHost {
             endpoint,
             shutdown: Arc::new(Mutex::new(Some(tx))),
             live_host_name: host_name_c,
+            guest_sends,
+            _preview_tx: preview_tx,
         })
     }
 
@@ -300,10 +370,24 @@ impl StudioHost {
         self.peers.lock().values().cloned().collect()
     }
 
+    pub fn guest_send_handles(&self) -> Vec<GuestSend> {
+        self.guest_sends.lock().values().cloned().collect()
+    }
+
+    pub async fn send_preview_to_guests(
+        &self,
+        participant_id: String,
+        jpeg_b64: Option<String>,
+        pcm_b64: Option<String>,
+    ) -> Result<(), String> {
+        fanout_preview(self.guest_send_handles(), participant_id, jpeg_b64, pcm_b64).await
+    }
+
     pub fn shutdown(&self) {
         if let Some(tx) = self.shutdown.lock().take() {
             let _ = tx.try_send(());
         }
+        self.guest_sends.lock().clear();
     }
 }
 
@@ -312,11 +396,14 @@ async fn handle_guest(
     password: String,
     host_name: String,
     peers: Arc<Mutex<HashMap<String, PeerInfo>>>,
+    guest_sends: Arc<Mutex<HashMap<String, GuestSend>>>,
+    preview_tx: PreviewBus,
 ) -> Result<(), String> {
-    let (mut send, mut recv) = conn
+    let (send, mut recv) = conn
         .accept_bi()
         .await
         .map_err(|e| format!("accept stream: {e}"))?;
+    let send = Arc::new(tokio::sync::Mutex::new(send));
 
     let msg = read_frame(&mut recv).await?;
     match msg {
@@ -326,13 +413,16 @@ async fn handle_guest(
             participant_id,
         } => {
             if pw != password {
-                write_frame(
-                    &mut send,
-                    &PeerMessage::Deny {
-                        reason: "Invalid studio password".into(),
-                    },
-                )
-                .await?;
+                {
+                    let mut s = send.lock().await;
+                    write_frame(
+                        &mut s,
+                        &PeerMessage::Deny {
+                            reason: "Invalid studio password".into(),
+                        },
+                    )
+                    .await?;
+                }
                 return Ok(());
             }
             tracing::info!(%participant_id, %name, "guest hello — waiting for admit");
@@ -345,15 +435,21 @@ async fn handle_guest(
                     admitted: false,
                 },
             );
-            write_frame(
-                &mut send,
-                &PeerMessage::Waiting {
-                    participant_id: participant_id.clone(),
-                    name,
-                    host_name,
-                },
-            )
-            .await?;
+            guest_sends
+                .lock()
+                .insert(participant_id.clone(), send.clone());
+            {
+                let mut s = send.lock().await;
+                write_frame(
+                    &mut s,
+                    &PeerMessage::Waiting {
+                        participant_id: participant_id.clone(),
+                        name,
+                        host_name,
+                    },
+                )
+                .await?;
+            }
 
             loop {
                 let admitted = peers
@@ -362,8 +458,9 @@ async fn handle_guest(
                     .map(|p| p.admitted)
                     .unwrap_or(false);
                 if admitted {
+                    let mut s = send.lock().await;
                     write_frame(
-                        &mut send,
+                        &mut s,
                         &PeerMessage::Admit {
                             participant_id: participant_id.clone(),
                         },
@@ -378,7 +475,19 @@ async fn handle_guest(
                 match read_frame(&mut recv).await {
                     Ok(PeerMessage::Leave { .. }) => {
                         peers.lock().remove(&participant_id);
+                        guest_sends.lock().remove(&participant_id);
                         break;
+                    }
+                    Ok(PeerMessage::PreviewFrame {
+                        participant_id: pid,
+                        jpeg_b64,
+                        pcm_b64,
+                    }) => {
+                        let _ = preview_tx.send(PreviewEvent {
+                            participant_id: pid,
+                            jpeg_b64,
+                            pcm_b64,
+                        });
                     }
                     Ok(PeerMessage::FileOffer {
                         participant_id,
@@ -391,6 +500,7 @@ async fn handle_guest(
                     Ok(_) => {}
                     Err(_) => {
                         peers.lock().remove(&participant_id);
+                        guest_sends.lock().remove(&participant_id);
                         break;
                     }
                 }
@@ -523,6 +633,29 @@ pub fn decode_ticket(s: &str) -> Result<InviteTicket, String> {
     serde_json::from_slice(&bytes).map_err(|e| format!("Invalid invite payload: {e}"))
 }
 
+pub async fn fanout_preview(
+    targets: Vec<GuestSend>,
+    participant_id: String,
+    jpeg_b64: Option<String>,
+    pcm_b64: Option<String>,
+) -> Result<(), String> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let msg = PeerMessage::PreviewFrame {
+        participant_id,
+        jpeg_b64,
+        pcm_b64,
+    };
+    for send in targets {
+        let mut guard = send.lock().await;
+        if let Err(e) = write_frame(&mut guard, &msg).await {
+            tracing::warn!("preview send to guest failed: {e}");
+        }
+    }
+    Ok(())
+}
+
 async fn write_frame(
     send: &mut iroh::endpoint::SendStream,
     msg: &PeerMessage,
@@ -639,7 +772,8 @@ mod tests {
             frame_rate: 30,
             resolution: "1080p".into(),
         };
-        let host = StudioHost::start(studio, "Host".into())
+        let (preview_tx, _preview_rx) = tokio::sync::broadcast::channel(16);
+        let host = StudioHost::start(studio, "Host".into(), preview_tx.clone())
             .await
             .expect("host start");
         let invite = host.encode_ticket().expect("encode");
@@ -658,7 +792,7 @@ mod tests {
             peers.iter().any(|p| p.id == "guest-1" && !p.admitted),
             "expected waiting guest in peer list: {peers:?}"
         );
-        let _session = stream.hold_open();
+        let _session = stream.hold_open(preview_tx);
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(
             host.peer_list().iter().any(|p| p.id == "guest-1"),

@@ -13,12 +13,12 @@ use capture::AudioRecorder;
 use db::Database;
 use models::*;
 use parking_lot::Mutex;
-use p2p::StudioHost;
+use p2p::{PreviewBus, StudioHost};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::webview::{PermissionKind, PermissionResponse};
-use tauri::{State, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, State, WebviewWindowBuilder};
 use uuid::Uuid;
 
 /// Origins served by this app (Vite in `tauri dev`, custom protocol in release).
@@ -130,10 +130,13 @@ pub struct AppState {
     pub session_dirs: Mutex<HashMap<String, PathBuf>>,
     /// session_id → Drafts/*.json (lobby / never-recorded)
     pub session_drafts: Mutex<HashMap<String, PathBuf>>,
+    /// Live A/V preview frames from the peer session → UI.
+    pub preview_tx: PreviewBus,
 }
 
 impl AppState {
     fn new() -> Result<Self, String> {
+        let (preview_tx, _) = tokio::sync::broadcast::channel(64);
         Ok(Self {
             db: Database::open()?,
             host: Mutex::new(None),
@@ -142,6 +145,7 @@ impl AppState {
             active_session: Mutex::new(None),
             session_dirs: Mutex::new(HashMap::new()),
             session_drafts: Mutex::new(HashMap::new()),
+            preview_tx,
         })
     }
 }
@@ -421,7 +425,8 @@ async fn create_studio(
     });
     let draft = write_draft_sync(&state, &session_id, &sync)?;
 
-    let host = StudioHost::start(settings.clone(), host_name.clone()).await?;
+    let host =
+        StudioHost::start(settings.clone(), host_name.clone(), state.preview_tx.clone()).await?;
     let ticket = host.encode_ticket()?;
     let peers = host.peer_list();
     *state.host.lock() = Some(host);
@@ -531,7 +536,7 @@ async fn join_studio(
     // Stay connected so the host sees us in the waiting list and can Admit.
     let (stream, host_name) =
         p2p::join_studio(&ticket, display_name.clone(), participant_id.clone()).await?;
-    *state.guest_conn.lock() = Some(stream.hold_open());
+    *state.guest_conn.lock() = Some(stream.hold_open(state.preview_tx.clone()));
 
     Ok(serde_json::json!({
         "session_id": session_id,
@@ -545,6 +550,37 @@ async fn join_studio(
         "connected": true,
         "draft_path": draft.to_string_lossy(),
     }))
+}
+
+#[tauri::command]
+async fn send_preview_frame(
+    state: State<'_, Arc<AppState>>,
+    participant_id: String,
+    jpeg_b64: Option<String>,
+    pcm_b64: Option<String>,
+) -> Result<(), String> {
+    if jpeg_b64.is_none() && pcm_b64.is_none() {
+        return Ok(());
+    }
+
+    // Guest → host
+    let guest_session = state.guest_conn.lock().take();
+    if let Some(session) = guest_session {
+        let result = session
+            .send_preview(participant_id.clone(), jpeg_b64.clone(), pcm_b64.clone())
+            .await;
+        *state.guest_conn.lock() = Some(session);
+        return result;
+    }
+
+    // Host → all guests (clone send handles so we never await under the host lock)
+    let targets = state
+        .host
+        .lock()
+        .as_ref()
+        .map(|h| h.guest_send_handles())
+        .unwrap_or_default();
+    p2p::fanout_preview(targets, participant_id, jpeg_b64, pcm_b64).await
 }
 
 #[tauri::command]
@@ -1296,6 +1332,7 @@ pub fn run() {
             get_session_thumbnail,
             reveal_session_folder,
             return_tracks_to_host,
+            send_preview_frame,
         ])
         .setup(|app| {
             let conf = app
@@ -1316,6 +1353,22 @@ pub fn run() {
             #[cfg(windows)]
             grant_webview_media_permissions(&window);
             let _ = window;
+
+            // Forward peer preview frames to the webview.
+            let handle = app.handle().clone();
+            let state = app.state::<Arc<AppState>>().inner().clone();
+            let mut rx = state.preview_tx.subscribe();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(ev) => {
+                            let _ = handle.emit("studio-preview", &ev);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
             Ok(())
         })
         .run(tauri::generate_context!())

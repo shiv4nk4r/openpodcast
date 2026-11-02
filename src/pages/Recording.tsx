@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -33,6 +34,7 @@ import { LiveCameraPreview } from "../components/LiveCameraPreview";
 import { Select } from "../components/Select";
 import { pickPreferred, useDeviceList } from "../hooks/useDeviceList";
 import { blobToBytes, blobToUint8, useLocalMedia } from "../hooks/useLocalMedia";
+import { useStudioPreview } from "../hooks/useStudioPreview";
 import { useApp } from "../state";
 import type { PeerInfo } from "../types";
 
@@ -128,6 +130,28 @@ export default function Recording() {
   } | null>(null);
   /** Everyone who appeared in the lobby / studio during this session */
   const rosterRef = useRef<Map<string, PeerInfo>>(new Map());
+
+  const getVideoEl = useCallback(() => {
+    // LiveCameraPreview registers the hidden <video> through media.setVideoEl
+    return (
+      document.querySelector(
+        ".rs-stage-tile .rs-live-video-hidden",
+      ) as HTMLVideoElement | null
+    );
+  }, []);
+  const getStream = useCallback(() => media.stream.current, [media.stream]);
+
+  const hasAdmittedGuest = peers.some((p) => p.admitted);
+  const { remotes } = useStudioPreview({
+    active: !!studio,
+    role: studio?.role === "guest" ? "guest" : "host",
+    hostHasAdmittedGuest: hasAdmittedGuest,
+    participantId: studio?.participantId ?? "host",
+    getVideoEl,
+    getStream,
+    camOn: camOn && !!videoMode,
+    micOn,
+  });
 
   useEffect(() => {
     if (!studio) navigate("/", { replace: true });
@@ -819,32 +843,44 @@ export default function Recording() {
               </div>
             )}
 
-            {guestTiles.map((p) => (
-              <div
-                className={`rs-stage-tile rs-stage-empty${p.admitted ? "" : " is-waiting"}`}
-                key={p.id}
-              >
-                <div className="rs-stage-name">{p.name}</div>
-                {!p.admitted && (
-                  <div className="rs-stage-waiting">
-                    <span>Waiting in lobby</span>
-                    <button
-                      type="button"
-                      className="rs-invite-copy"
-                      onClick={() => {
-                        void (async () => {
-                          await api.admitGuest(p.id);
-                          const list = await api.listPeers();
-                          setPeers(list);
-                        })();
-                      }}
-                    >
-                      Admit
-                    </button>
-                  </div>
-                )}
-              </div>
-            ))}
+            {guestTiles.map((p) => {
+              const remote = remotes[p.id];
+              const showRemote =
+                p.admitted && !!remote?.jpeg && Date.now() - remote.updatedAt < 4000;
+              return (
+                <div
+                  className={`rs-stage-tile${p.admitted && showRemote ? "" : " rs-stage-empty"}${p.admitted ? "" : " is-waiting"}`}
+                  key={p.id}
+                >
+                  {showRemote ? (
+                    <img
+                      className="rs-stage-preview rs-remote-preview"
+                      src={`data:image/jpeg;base64,${remote.jpeg}`}
+                      alt=""
+                    />
+                  ) : null}
+                  <div className="rs-stage-name">{p.name}</div>
+                  {!p.admitted && (
+                    <div className="rs-stage-waiting">
+                      <span>Waiting in lobby</span>
+                      <button
+                        type="button"
+                        className="rs-invite-copy"
+                        onClick={() => {
+                          void (async () => {
+                            await api.admitGuest(p.id);
+                            const list = await api.listPeers();
+                            setPeers(list);
+                          })();
+                        }}
+                      >
+                        Admit
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
 
           {prompterOpen && (

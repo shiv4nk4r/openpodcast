@@ -48,6 +48,16 @@ export const api = {
   listPeers: () => invoke<PeerInfo[]>("list_peers"),
   admitGuest: (participantId: string) =>
     invoke<void>("admit_guest", { participantId }),
+  sendPreviewFrame: (
+    participantId: string,
+    jpegB64?: string,
+    pcmB64?: string,
+  ) =>
+    invoke<void>("send_preview_frame", {
+      participantId,
+      jpegB64: jpegB64 ?? null,
+      pcmB64: pcmB64 ?? null,
+    }),
   decodeInvite: (invite: string) =>
     invoke<InviteTicket>("decode_invite", { invite }),
   joinStudio: (invite: string, displayName: string) =>

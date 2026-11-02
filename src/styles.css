@@ -3135,6 +3135,14 @@ a {
   outline-offset: -8px;
 }
 
+.rs-remote-preview {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  background: #111;
+}
+
 .rs-stage-waiting {
   position: absolute;
   inset: 0;
