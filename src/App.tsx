@@ -7,97 +7,31 @@ import Recording from "./pages/Recording";
 import Editor from "./pages/Editor";
 import Playback from "./pages/Playback";
 import Settings from "./pages/Settings";
-import Onboarding, { isOnboardingComplete } from "./pages/Onboarding";
-
-function RequireOnboarded({ children }: { children: React.ReactNode }) {
-  if (!isOnboardingComplete()) {
-    return <Navigate to="/onboarding" replace />;
-  }
-  return children;
-}
 
 export default function App() {
   return (
     <div className="app-shell">
       <ErrorBoundary label="app">
-      <Routes>
-        <Route path="/onboarding" element={<Onboarding />} />
-        <Route
-          path="/"
-          element={
-            <RequireOnboarded>
-              <Lobby />
-            </RequireOnboarded>
-          }
-        />
-        <Route
-          path="/lobby"
-          element={
-            <RequireOnboarded>
-              <Lobby />
-            </RequireOnboarded>
-          }
-        />
-        <Route
-          path="/join"
-          element={
-            <RequireOnboarded>
-              <Lobby initialPanel="invite" />
-            </RequireOnboarded>
-          }
-        />
-        <Route
-          path="/studio"
-          element={
-            <RequireOnboarded>
-              <Recording />
-            </RequireOnboarded>
-          }
-        />
-        <Route
-          path="/recordings"
-          element={
-            <RequireOnboarded>
+        <Routes>
+          <Route path="/" element={<Lobby />} />
+          <Route path="/lobby" element={<Lobby />} />
+          <Route path="/join" element={<Lobby initialPanel="invite" />} />
+          <Route path="/studio" element={<Recording />} />
+          <Route
+            path="/recordings"
+            element={
               <ErrorBoundary label="recordings">
                 <Dashboard />
               </ErrorBoundary>
-            </RequireOnboarded>
-          }
-        />
-        <Route
-          path="/create"
-          element={
-            <RequireOnboarded>
-              <CreateStudio />
-            </RequireOnboarded>
-          }
-        />
-        <Route
-          path="/editor/:id"
-          element={
-            <RequireOnboarded>
-              <Editor />
-            </RequireOnboarded>
-          }
-        />
-        <Route
-          path="/playback/:id"
-          element={
-            <RequireOnboarded>
-              <Playback />
-            </RequireOnboarded>
-          }
-        />
-        <Route
-          path="/settings"
-          element={
-            <RequireOnboarded>
-              <Settings />
-            </RequireOnboarded>
-          }
-        />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+            }
+          />
+          <Route path="/create" element={<CreateStudio />} />
+          <Route path="/editor/:id" element={<Editor />} />
+          <Route path="/playback/:id" element={<Playback />} />
+          <Route path="/settings" element={<Settings />} />
+          <Route path="/onboarding" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
       </ErrorBoundary>
     </div>
   );

@@ -84,12 +84,19 @@ struct TrackMedia {
     offset_ms: u64,
 }
 
-/// Dark studio stage tokens — match `[data-theme="dark"]` preview chrome.
+/// Light studio stage tokens — match default `[data-theme="light"]` preview.
 struct StudioChrome {
     /// Page / canvas background (`--page`)
     bg: &'static str,
     /// Soft tile shadow opacity
     shadow_alpha: f64,
+    /// Empty / cam-off tile fill (`--surface-3`)
+    empty_bg: &'static str,
+    /// Empty tile label (`--ink-muted`)
+    empty_fg: &'static str,
+    /// Name chip fill / text (`--chip` / `--chip-text`)
+    chip_bg: &'static str,
+    chip_fg: &'static str,
     pad: u32,
     gap: u32,
     radius: u32,
@@ -105,8 +112,13 @@ impl StudioChrome {
         let scale = w as f64 / 1920.0;
         let px = |v: f64| -> u32 { (v * scale).round().max(1.0) as u32 };
         Self {
-            bg: "0x0b0b0d",
-            shadow_alpha: 0.40,
+            // `--page` light default
+            bg: "0xf1f4f9",
+            shadow_alpha: 0.18,
+            empty_bg: "0xe9edf5",
+            empty_fg: "0x5b6578",
+            chip_bg: "0xffffff@0.86",
+            chip_fg: "0x10141c",
             pad: px(20.0),
             gap: px(12.0),
             radius: px(18.0).clamp(10, 40),
@@ -472,15 +484,17 @@ pub fn render_final_video(
                 fitted = fitted
             ));
         } else {
-            // Cam-off / audio-only plate — matches preview `.tile .empty` gradient.
+            // Cam-off / audio-only plate — matches preview `.tile .empty`.
             let empty_name = escape_drawtext(&t.name);
             fc.push(format!(
-                "color=c=0x222226:s={cw}x{ch}:d={dur:.3}:r={fps},format=rgba,drawtext=text='{empty_name}':fontsize={fs}:fontcolor=0x8f8f98{font}:x=(w-text_w)/2:y=(h-text_h)/2[{fitted}]",
+                "color=c={empty_bg}:s={cw}x{ch}:d={dur:.3}:r={fps},format=rgba,drawtext=text='{empty_name}':fontsize={fs}:fontcolor={empty_fg}{font}:x=(w-text_w)/2:y=(h-text_h)/2[{fitted}]",
+                empty_bg = chrome.empty_bg,
                 cw = cell.w,
                 ch = cell.h,
                 dur = duration_secs,
                 fps = fps,
                 empty_name = empty_name,
+                empty_fg = chrome.empty_fg,
                 fs = (chrome.chip_fontsize as f64 * 1.6).round() as u32,
                 font = chrome.font_arg(),
                 fitted = fitted
@@ -501,15 +515,17 @@ pub fn render_final_video(
             shadow = shadow
         ));
 
-        // Name chip — matches `.name-tag` (dark chip + Manrope).
+        // Name chip — matches light `.name-tag` (`--chip` / Manrope).
         let label = escape_drawtext(&track_label(t));
         let chip_x = chrome.chip_inset;
         let chip_bottom = chrome.chip_inset;
         fc.push(format!(
-            "[{rounded}]drawtext=text='{label}':fontsize={fs}:fontcolor=0xf4f4f5{font}:box=1:boxcolor=0x0c0c0e@0.72:boxborderw={pad}:x={x}:y=h-text_h-{bottom}-{pad}[{named}]",
+            "[{rounded}]drawtext=text='{label}':fontsize={fs}:fontcolor={chip_fg}{font}:box=1:boxcolor={chip_bg}:boxborderw={pad}:x={x}:y=h-text_h-{bottom}-{pad}[{named}]",
             rounded = rounded,
             label = label,
             fs = chrome.chip_fontsize,
+            chip_fg = chrome.chip_fg,
+            chip_bg = chrome.chip_bg,
             font = chrome.font_arg(),
             pad = chrome.chip_pad_y.max(chrome.chip_pad_x / 2),
             x = chip_x,
@@ -705,6 +721,645 @@ pub fn render_final_audio(
 
     run_ffmpeg(&ffmpeg, &args, duration_secs, on_progress)?;
     Ok(out)
+}
+
+/// Build an NLE package Resolve can import: Final Cut Pro 7 XML (`.xml`) is the
+/// most reliable path in DaVinci Resolve for multi-track ISO timelines.
+/// Also writes a companion FCPXML 1.8 for Final Cut / Premiere.
+pub fn export_nle_timeline(
+    session_dir: &Path,
+    project_name: &str,
+    resolution: &str,
+    fps: u32,
+) -> Result<PathBuf, String> {
+    let timeline = load_timeline(session_dir);
+    let tracks = discover_tracks(session_dir, &timeline);
+    if tracks.is_empty() {
+        return Err("No media tracks found to export".into());
+    }
+
+    let opts = RenderVideoOpts {
+        resolution: resolution.to_string(),
+        fps,
+    };
+    let (width, height) = opts.size();
+    let fps = opts.fps();
+    let duration_secs = timeline.duration_secs.max(0.5);
+    let frames = ((duration_secs * fps as f64).round() as i64).max(1);
+
+    let out_dir = session_dir.join("exports").join(format!(
+        "nle-{}",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+    ));
+    std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    let media_dir = out_dir.join("media");
+    std::fs::create_dir_all(&media_dir).map_err(|e| e.to_string())?;
+
+    let mut stem = sanitize_filename(project_name);
+    if stem.is_empty() {
+        stem = "OpenPodcast".into();
+    }
+    stem = stem.chars().take(80).collect();
+
+    #[derive(Clone)]
+    struct NleClip {
+        name: String,
+        local_path: PathBuf,
+        offset_frames: i64,
+        is_video: bool,
+    }
+
+    // Resolve often refuses browser WebM / exotic containers. Transcode video
+    // to H.264 MP4 and keep WAV audio as-is.
+    let ffmpeg = which_ffmpeg();
+    let mut clips: Vec<NleClip> = Vec::new();
+    for (ti, t) in tracks.iter().enumerate() {
+        let off_frames = ((t.offset_ms as f64 / 1000.0) * fps as f64).round() as i64;
+        if let Some(v) = &t.video {
+            let dest = media_dir.join(format!(
+                "{:02}-{}-video.mp4",
+                ti + 1,
+                sanitize_filename(&t.name)
+            ));
+            prepare_resolve_video(ffmpeg.as_deref(), v, &dest, fps)?;
+            clips.push(NleClip {
+                name: format!("{} video", t.name),
+                local_path: dest,
+                offset_frames: off_frames,
+                is_video: true,
+            });
+        }
+        if let Some(a) = &t.audio {
+            let dest = media_dir.join(format!(
+                "{:02}-{}-audio.wav",
+                ti + 1,
+                sanitize_filename(&t.name)
+            ));
+            link_or_copy(a, &dest)?;
+            clips.push(NleClip {
+                name: format!("{} audio", t.name),
+                local_path: dest,
+                offset_frames: off_frames,
+                is_video: false,
+            });
+        }
+    }
+
+    if clips.is_empty() {
+        return Err("No video or audio files to put on the NLE timeline".into());
+    }
+
+    let project = xml_escape(project_name);
+    let ntsc = if matches!(fps, 24 | 30 | 60) {
+        "TRUE"
+    } else {
+        "FALSE"
+    };
+    let rate_xml = format!(
+        "<rate><timebase>{fps}</timebase><ntsc>{ntsc}</ntsc></rate>"
+    );
+
+    let mut video_tracks = String::new();
+    let mut audio_tracks = String::new();
+    let mut file_id = 1u32;
+    let mut clip_id = 1u32;
+
+    for clip in &clips {
+        let pathurl = file_url_localhost(&clip.local_path)?;
+        let name = xml_escape(&clip.name);
+        let start = clip.offset_frames.max(0);
+        let end = start + frames;
+        let fid = format!("file-{file_id}");
+        let cid = format!("clipitem-{clip_id}");
+        file_id += 1;
+        clip_id += 1;
+
+        if clip.is_video {
+            video_tracks.push_str(&format!(
+                r#"        <track>
+          <clipitem id="{cid}">
+            <name>{name}</name>
+            <enabled>TRUE</enabled>
+            <duration>{frames}</duration>
+            {rate}
+            <start>{start}</start>
+            <end>{end}</end>
+            <in>0</in>
+            <out>{frames}</out>
+            <file id="{fid}">
+              <name>{name}</name>
+              <pathurl>{pathurl}</pathurl>
+              <rate>{rate_inner}</rate>
+              <duration>{frames}</duration>
+              <media>
+                <video>
+                  <samplecharacteristics>
+                    <rate>{rate_inner}</rate>
+                    <width>{width}</width>
+                    <height>{height}</height>
+                    <pixelaspectratio>square</pixelaspectratio>
+                    <fielddominance>none</fielddominance>
+                  </samplecharacteristics>
+                </video>
+              </media>
+            </file>
+          </clipitem>
+          <enabled>TRUE</enabled>
+          <locked>FALSE</locked>
+        </track>
+"#,
+                cid = cid,
+                name = name,
+                frames = frames,
+                rate = rate_xml,
+                rate_inner = format!(
+                    "<timebase>{fps}</timebase><ntsc>{ntsc}</ntsc>"
+                ),
+                start = start,
+                end = end,
+                fid = fid,
+                pathurl = pathurl,
+                width = width,
+                height = height,
+            ));
+        } else {
+            audio_tracks.push_str(&format!(
+                r#"        <track>
+          <clipitem id="{cid}">
+            <name>{name}</name>
+            <enabled>TRUE</enabled>
+            <duration>{frames}</duration>
+            {rate}
+            <start>{start}</start>
+            <end>{end}</end>
+            <in>0</in>
+            <out>{frames}</out>
+            <file id="{fid}">
+              <name>{name}</name>
+              <pathurl>{pathurl}</pathurl>
+              <rate>{rate_inner}</rate>
+              <duration>{frames}</duration>
+              <media>
+                <audio>
+                  <samplecharacteristics>
+                    <depth>16</depth>
+                    <samplerate>48000</samplerate>
+                  </samplecharacteristics>
+                  <channelcount>2</channelcount>
+                </audio>
+              </media>
+            </file>
+            <sourcetrack>
+              <mediatype>audio</mediatype>
+              <trackindex>1</trackindex>
+            </sourcetrack>
+          </clipitem>
+          <enabled>TRUE</enabled>
+          <locked>FALSE</locked>
+        </track>
+"#,
+                cid = cid,
+                name = name,
+                frames = frames,
+                rate = rate_xml,
+                rate_inner = format!(
+                    "<timebase>{fps}</timebase><ntsc>{ntsc}</ntsc>"
+                ),
+                start = start,
+                end = end,
+                fid = fid,
+                pathurl = pathurl,
+            ));
+        }
+    }
+
+    // Resolve is most reliable with Final Cut Pro 7 / XMEML for multi-track ISO.
+    let xmeml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE xmeml>
+<xmeml version="5">
+  <sequence id="sequence-1">
+    <name>{project}</name>
+    <duration>{frames}</duration>
+    {rate}
+    <timecode>
+      {rate}
+      <string>00:00:00:00</string>
+      <frame>0</frame>
+      <displayformat>NDF</displayformat>
+    </timecode>
+    <media>
+      <video>
+        <format>
+          <samplecharacteristics>
+            {rate}
+            <width>{width}</width>
+            <height>{height}</height>
+            <pixelaspectratio>square</pixelaspectratio>
+            <fielddominance>none</fielddominance>
+          </samplecharacteristics>
+        </format>
+{video_tracks}      </video>
+      <audio>
+{audio_tracks}      </audio>
+    </media>
+  </sequence>
+</xmeml>
+"#,
+        project = project,
+        frames = frames,
+        rate = rate_xml,
+        width = width,
+        height = height,
+        video_tracks = video_tracks,
+        audio_tracks = audio_tracks,
+    );
+
+    let xml_path = out_dir.join(format!("{stem}.xml"));
+    std::fs::write(&xml_path, xmeml).map_err(|e| e.to_string())?;
+
+    // Companion FCPXML 1.8 (gap + lanes) for Final Cut / some Premiere workflows.
+    let _ = write_fcpxml_companion(
+        &out_dir.join(format!("{stem}.fcpxml")),
+        project_name,
+        &clips
+            .iter()
+            .map(|c| {
+                (
+                    c.name.clone(),
+                    c.local_path.clone(),
+                    c.offset_frames,
+                    c.is_video,
+                )
+            })
+            .collect::<Vec<_>>(),
+        width,
+        height,
+        fps,
+        frames,
+    );
+
+    // OTIO is the most reliable Resolve Free interchange for multi-track ISO.
+    let otio_path = out_dir.join(format!("{stem}.otio"));
+    let otio_clips: Vec<(String, PathBuf, i64, bool)> = clips
+        .iter()
+        .map(|c| {
+            (
+                c.name.clone(),
+                c.local_path.clone(),
+                c.offset_frames,
+                c.is_video,
+            )
+        })
+        .collect();
+    write_otio(&otio_path, project_name, &otio_clips, fps, frames)?;
+
+    let readme = format!(
+        "OpenPodcast → DaVinci Resolve\n\
+         ============================\n\n\
+         IMPORTANT: Do NOT use File → Open on these files.\n\
+         You must IMPORT a timeline while a project is already open.\n\n\
+         Best file to import (Resolve Free + Studio):\n\
+           {otio}\n\n\
+         Steps that work\n\
+         1. Open Resolve → create or open a project\n\
+         2. Switch to the Edit page\n\
+         3. In the Media Pool (left), right-click empty space →\n\
+            Timelines → Import…\n\
+            (or File → Import → Timeline… / Shift-Cmd-I)\n\
+         4. Choose the .otio file (fallback: the .xml file)\n\
+         5. Confirm the import dialog\n\
+         6. Double-click the new timeline in the Media Pool\n\n\
+         Media is already H.264 MP4 + WAV in media/\n\
+         If clips are offline: right-click → Relink → select media/\n\n\
+         Manual fallback (always works)\n\
+         1. File → Import → Media… and select everything in media/\n\
+         2. Select clips in the Media Pool → right-click →\n\
+            Create New Timeline Using Selected Clips\n\
+         3. Stack / sync tracks by hand (offsets are in clip names)\n\n\
+         Adobe Premiere Pro\n\
+         Prefer: {xml}\n\
+         1. Open/create a Premiere project\n\
+         2. File → Import… (Cmd/Ctrl-I)\n\
+         3. Choose the .xml file (Final Cut Pro 7 XML)\n\
+         4. Premiere builds a sequence with stacked ISO tracks\n\
+         5. If media is offline, relink to the media/ folder\n\n\
+         Notes\n\
+         - .fcpxml is mainly for Final Cut; Premiere prefers .xml\n\
+         - Recent Premiere versions may also import .otio\n\
+         - Media is H.264 MP4 + WAV so Premiere can play it\n",
+        otio = otio_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("timeline.otio"),
+        xml = xml_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("timeline.xml"),
+    );
+    let _ = std::fs::write(out_dir.join("README-open-in-resolve.txt"), readme);
+
+    // Premiere Pro is the primary target — return the FCP7 .xml path.
+    Ok(xml_path)
+}
+
+fn prepare_resolve_video(
+    ffmpeg: Option<&Path>,
+    src: &Path,
+    dest: &Path,
+    fps: u32,
+) -> Result<(), String> {
+    let Some(ffmpeg) = ffmpeg else {
+        // No ffmpeg — copy as-is and hope Resolve accepts the container.
+        return link_or_copy(src, dest);
+    };
+    // Prefer a Resolve-friendly H.264 MP4. Copy streams when possible.
+    let try_copy = Command::new(ffmpeg)
+        .args([
+            "-y",
+            "-i",
+            &src.to_string_lossy(),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            &dest.to_string_lossy(),
+        ])
+        .output()
+        .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
+    if try_copy.status.success() && dest.is_file() {
+        return Ok(());
+    }
+    let _ = std::fs::remove_file(dest);
+    let reencode = Command::new(ffmpeg)
+        .args([
+            "-y",
+            "-i",
+            &src.to_string_lossy(),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "veryfast",
+            "-r",
+            &fps.to_string(),
+            "-an",
+            "-movflags",
+            "+faststart",
+            &dest.to_string_lossy(),
+        ])
+        .output()
+        .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
+    if reencode.status.success() && dest.is_file() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&reencode.stderr);
+    let tail: String = err.chars().rev().take(400).collect::<String>().chars().rev().collect();
+    Err(format!("could not prepare video for Resolve: {tail}"))
+}
+
+fn write_otio(
+    path: &Path,
+    project_name: &str,
+    clips: &[(String, PathBuf, i64, bool)],
+    fps: u32,
+    frames: i64,
+) -> Result<(), String> {
+    let rate = fps as f64;
+    let mut video_tracks = Vec::new();
+    let mut audio_tracks = Vec::new();
+
+    for (name, local, offset_frames, is_video) in clips {
+        let target_url = file_url_localhost(local)?;
+        let mut children = Vec::new();
+        let off = (*offset_frames).max(0);
+        if off > 0 {
+            children.push(serde_json::json!({
+                "OTIO_SCHEMA": "Gap.1",
+                "name": "sync offset",
+                "source_range": {
+                    "OTIO_SCHEMA": "TimeRange.1",
+                    "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": 0.0 },
+                    "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": off as f64 }
+                }
+            }));
+        }
+        children.push(serde_json::json!({
+            "OTIO_SCHEMA": "Clip.1",
+            "name": name,
+            "source_range": {
+                "OTIO_SCHEMA": "TimeRange.1",
+                "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": 0.0 },
+                "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": frames as f64 }
+            },
+            "media_reference": {
+                "OTIO_SCHEMA": "ExternalReference.1",
+                "target_url": target_url,
+                "available_range": {
+                    "OTIO_SCHEMA": "TimeRange.1",
+                    "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": 0.0 },
+                    "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": frames as f64 }
+                }
+            }
+        }));
+
+        let track = serde_json::json!({
+            "OTIO_SCHEMA": "Track.1",
+            "name": name,
+            "kind": if *is_video { "Video" } else { "Audio" },
+            "children": children
+        });
+        if *is_video {
+            video_tracks.push(track);
+        } else {
+            audio_tracks.push(track);
+        }
+    }
+
+    let mut all_tracks = video_tracks;
+    all_tracks.extend(audio_tracks);
+
+    let doc = serde_json::json!({
+        "OTIO_SCHEMA": "Timeline.1",
+        "name": project_name,
+        "global_start_time": {
+            "OTIO_SCHEMA": "RationalTime.1",
+            "rate": rate,
+            "value": 0.0
+        },
+        "tracks": {
+            "OTIO_SCHEMA": "Stack.1",
+            "name": "tracks",
+            "children": all_tracks
+        }
+    });
+
+    let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(path, text).map_err(|e| e.to_string())
+}
+
+fn write_fcpxml_companion(
+    path: &Path,
+    project_name: &str,
+    clips: &[(String, PathBuf, i64, bool)],
+    width: u32,
+    height: u32,
+    fps: u32,
+    frames: i64,
+) -> Result<(), String> {
+    let frame_dur = fcpx_frame_duration(fps);
+    let seq_dur = format!("{frames}/{fps}s");
+    let mut resources = format!(
+        r#"    <format id="r1" name="FFVideoFormat{height}p{fps}" frameDuration="{frame_dur}" width="{width}" height="{height}"/>
+"#
+    );
+    let mut spine_kids = String::new();
+    let mut next = 2u32;
+    let mut v_lane = 1i32;
+    let mut a_lane = -1i32;
+
+    for (name, local, offset_frames, is_video) in clips {
+        let id = format!("r{next}");
+        next += 1;
+        let src = file_url_localhost(local)?;
+        let ename = xml_escape(name);
+        if *is_video {
+            resources.push_str(&format!(
+                r#"    <asset id="{id}" name="{ename}" start="0s" duration="{seq_dur}" hasVideo="1" hasAudio="0" format="r1">
+      <media-rep kind="original-media" src="{src}"/>
+    </asset>
+"#
+            ));
+            let lane = v_lane;
+            v_lane += 1;
+            spine_kids.push_str(&format!(
+                r#"            <asset-clip ref="{id}" name="{ename}" lane="{lane}" offset="{off}/{fps}s" duration="{seq_dur}" start="0s"/>
+"#,
+                id = id,
+                ename = ename,
+                lane = lane,
+                off = (*offset_frames).max(0),
+                fps = fps,
+                seq_dur = seq_dur,
+            ));
+        } else {
+            resources.push_str(&format!(
+                r#"    <asset id="{id}" name="{ename}" start="0s" duration="{seq_dur}" hasVideo="0" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+      <media-rep kind="original-media" src="{src}"/>
+    </asset>
+"#
+            ));
+            let lane = a_lane;
+            a_lane -= 1;
+            spine_kids.push_str(&format!(
+                r#"            <asset-clip ref="{id}" name="{ename}" lane="{lane}" offset="{off}/{fps}s" duration="{seq_dur}" start="0s"/>
+"#,
+                id = id,
+                ename = ename,
+                lane = lane,
+                off = (*offset_frames).max(0),
+                fps = fps,
+                seq_dur = seq_dur,
+            ));
+        }
+    }
+
+    let project = xml_escape(project_name);
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.8">
+  <resources>
+{resources}  </resources>
+  <library>
+    <event name="OpenPodcast">
+      <project name="{project}">
+        <sequence format="r1" duration="{seq_dur}" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+          <spine>
+            <gap name="ISO" offset="0s" duration="{seq_dur}">
+{spine_kids}            </gap>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>
+"#
+    );
+    std::fs::write(path, xml).map_err(|e| e.to_string())
+}
+
+fn link_or_copy(src: &Path, dest: &Path) -> Result<(), String> {
+    if dest.exists() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        if std::fs::hard_link(src, dest).is_ok() {
+            return Ok(());
+        }
+    }
+    std::fs::copy(src, dest)
+        .map(|_| ())
+        .map_err(|e| format!("failed to copy {}: {e}", src.display()))
+}
+
+fn fcpx_frame_duration(fps: u32) -> String {
+    match fps {
+        24 => "100/2400s".into(),
+        25 => "1/25s".into(),
+        30 => "100/3000s".into(),
+        50 => "1/50s".into(),
+        60 => "100/6000s".into(),
+        n => format!("1/{n}s"),
+    }
+}
+
+fn file_url_localhost(path: &Path) -> Result<String, String> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(path)
+    };
+    let abs = abs.canonicalize().unwrap_or(abs);
+    // Resolve prefers file://localhost/… on macOS/Windows interchange.
+    let url = url::Url::from_file_path(&abs)
+        .map_err(|_| format!("invalid media path: {}", path.display()))?;
+    let s = url.to_string();
+    if s.starts_with("file:///") {
+        Ok(format!("file://localhost/{}", s.trim_start_matches("file:///")))
+    } else {
+        Ok(s)
+    }
+}
+
+fn xml_escape(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '&' => "&amp;".into(),
+            '<' => "&lt;".into(),
+            '>' => "&gt;".into(),
+            '"' => "&quot;".into(),
+            '\'' => "&apos;".into(),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
+fn sanitize_filename(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect::<String>()
+        .trim()
+        .trim_matches('.')
+        .to_string()
 }
 
 fn normalize_layout(layout: &str) -> &str {

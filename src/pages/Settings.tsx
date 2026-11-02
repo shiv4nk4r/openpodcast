@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { open as openDirectory } from "@tauri-apps/plugin-dialog";
-import { open } from "@tauri-apps/plugin-shell";
 import {
   IconArrowLeft,
   IconCamera,
@@ -17,11 +16,10 @@ import { Select } from "../components/Select";
 import { pickPreferred, useDeviceList } from "../hooks/useDeviceList";
 import { useApp } from "../state";
 import { useTheme, type ThemeId } from "../theme";
-import { resetOnboarding } from "./Onboarding";
 
 export default function Settings() {
   const navigate = useNavigate();
-  const { settings, refreshSettings, persistSettings } = useApp();
+  const { settings, persistSettings } = useApp();
   const { theme, setTheme, themes } = useTheme();
   const devices = useDeviceList();
   const previewRef = useRef<HTMLVideoElement | null>(null);
@@ -48,7 +46,6 @@ export default function Settings() {
     drafts: string;
     models: string;
   } | null>(null);
-  const [oauthCode, setOauthCode] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [micLevel, setMicLevel] = useState(0);
@@ -266,69 +263,6 @@ export default function Settings() {
       setMsg(String(e));
     }
   }
-
-  async function connectDrive() {
-    try {
-      setMsg("Starting local sign-in helper…");
-      const url = await api.beginDriveOauth();
-      await open(url);
-      setMsg(
-        "Sign in with Google in the browser. If the page says it can’t connect, that is OK — copy the FULL address from the browser URL bar (starts with http://127.0.0.1:17834/callback?code=…), paste it below, and click Complete connection.",
-      );
-    } catch (e) {
-      setMsg(String(e));
-    }
-  }
-
-  async function finishDrive(raw?: string) {
-    const value = (raw ?? oauthCode).trim();
-    if (!value) {
-      setMsg("Paste the full redirect URL from the browser, then try again.");
-      return;
-    }
-    try {
-      setMsg("Finishing Google Drive connection…");
-      await api.completeDriveOauth(value);
-      setOauthCode("");
-      await refreshSettings();
-      setMsg("Google Drive connected");
-    } catch (e) {
-      setMsg(String(e));
-    }
-  }
-
-  function onOauthPaste(value: string) {
-    setOauthCode(value);
-    if (/callback\?.*code=/.test(value) || /[?&]code=/.test(value)) {
-      void finishDrive(value);
-    }
-  }
-
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void (async () => {
-      try {
-        const { listen } = await import("@tauri-apps/api/event");
-        unlisten = await listen<{ ok: boolean; error?: string }>(
-          "drive-oauth-done",
-          async (ev) => {
-            if (ev.payload?.ok) {
-              setOauthCode("");
-              await refreshSettings();
-              setMsg("Google Drive connected");
-            } else if (ev.payload?.error) {
-              setMsg(ev.payload.error);
-            }
-          },
-        );
-      } catch {
-        /* browser preview */
-      }
-    })();
-    return () => {
-      unlisten?.();
-    };
-  }, [refreshSettings]);
 
   const cameraOptions = devices.cameras.map((d) => ({
     value: d.deviceId,
@@ -568,56 +502,6 @@ export default function Settings() {
           </div>
         </section>
 
-        <section className="rs-settings-card">
-          <div className="rs-settings-card-head">
-            <h2>Google Drive</h2>
-            <p>
-              Status:{" "}
-              <strong className={settings.drive_connected ? "is-ok" : ""}>
-                {settings.drive_connected ? "Connected" : "Not connected"}
-              </strong>
-            </p>
-          </div>
-          {!settings.drive_connected ? (
-            <div className="rs-settings-fields">
-              <button
-                type="button"
-                className="rs-join-btn rs-settings-primary"
-                onClick={() => void connectDrive()}
-              >
-                Connect Google Drive
-              </button>
-              <div className="field">
-                <label>Redirect URL or code (fallback)</label>
-                <input
-                  value={oauthCode}
-                  onChange={(e) => onOauthPaste(e.target.value)}
-                  placeholder="Paste full http://127.0.0.1:17834/callback?code=… URL"
-                />
-              </div>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => void finishDrive()}
-              >
-                Complete connection
-              </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={async () => {
-                await api.disconnectDrive();
-                await refreshSettings();
-                setMsg("Google Drive disconnected");
-              }}
-            >
-              Disconnect
-            </button>
-          )}
-        </section>
-
         {/* AI provider — paused for now
         <section className="rs-settings-card">
           <div className="rs-settings-card-head">
@@ -678,22 +562,12 @@ export default function Settings() {
         </section>
         */}
 
-        <section className="rs-settings-card">
-          <div className="rs-settings-card-head">
-            <h2>Onboarding</h2>
-            <p>Replay the first-run setup for this machine.</p>
-          </div>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => {
-              resetOnboarding();
-              navigate("/onboarding", { replace: true });
-            }}
-          >
-            Replay onboarding
-          </button>
-          {paths && (
+        {paths && (
+          <section className="rs-settings-card">
+            <div className="rs-settings-card-head">
+              <h2>Local paths</h2>
+              <p>Where this machine stores recordings and app data.</p>
+            </div>
             <p className="rs-settings-paths">
               Recordings · {paths.recordings}
               <br />
@@ -701,8 +575,8 @@ export default function Settings() {
               <br />
               Data · {paths.data}
             </p>
-          )}
-        </section>
+          </section>
+        )}
 
         <div className="rs-settings-footer">
           <button

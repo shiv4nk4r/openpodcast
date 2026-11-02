@@ -1,2 +1,5 @@
+# Prefer rustup's stable (currently 1.99+). iroh 1.4 needs rustc >= 1.91 —
+# Homebrew rustc 1.90 will fail; `npm run tauri` puts ~/.cargo/bin first.
 [toolchain]
 channel = "stable"
+components = ["rustfmt", "clippy"]

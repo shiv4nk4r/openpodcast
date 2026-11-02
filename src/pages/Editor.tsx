@@ -407,9 +407,6 @@ export default function Editor() {
         },
         cues,
       );
-      if (settings.drive_connected) {
-        await api.uploadSessionToDrive(id!);
-      }
       await refreshSessions();
       alert(`Exported to:\n${path}`);
     } catch (e) {
@@ -841,25 +838,6 @@ export default function Editor() {
               >
                 Reveal folder
               </button>
-              {settings.drive_connected && (
-                <button
-                  className="btn btn-primary"
-                  style={{ marginTop: 8, width: "100%" }}
-                  onClick={async () => {
-                    setBusy("Uploading to Drive…");
-                    try {
-                      await api.uploadSessionToDrive(id!);
-                      await refreshSessions();
-                    } catch (e) {
-                      alert(String(e));
-                    } finally {
-                      setBusy(null);
-                    }
-                  }}
-                >
-                  Upload to Drive
-                </button>
-              )}
             </>
           )}
           {(tool === "stock" || tool === "music" || tool === "brand" || tool === "text") && (

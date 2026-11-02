@@ -171,6 +171,16 @@ export const api = {
       resolution: opts?.resolution ?? null,
       fps: opts?.fps ?? null,
     }),
+  /** FCPXML timeline for DaVinci Resolve / Premiere / Final Cut. */
+  exportNleTimeline: (
+    sessionId: string,
+    opts?: { resolution?: string; fps?: number },
+  ) =>
+    invoke<string>("export_nle_timeline", {
+      sessionId,
+      resolution: opts?.resolution ?? null,
+      fps: opts?.fps ?? null,
+    }),
   discardSession: (sessionId: string) =>
     invoke<void>("discard_session", { sessionId }),
   /** Permanently delete a saved recording and its local files. */

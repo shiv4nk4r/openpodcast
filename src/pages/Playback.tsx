@@ -3,18 +3,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   IconArrowLeft,
+  IconChevronDown,
   IconFolderOpen,
-  IconMovie,
   IconPlayerPause,
   IconPlayerPlay,
   IconTrash,
+  IconVideo,
 } from "@tabler/icons-react";
 import { api } from "../api";
 import { DeleteRecordingDialog } from "../components/DeleteRecordingDialog";
-import {
-  RenderPodcastDialog,
-  type RenderMode,
-} from "../components/RenderPodcastDialog";
 import {
   intervalsFromEvents,
   isPresentAt,
@@ -90,17 +87,11 @@ export default function Playback() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [previewLayout, setPreviewLayout] = useState<RenderLayout>("dynamic");
-  const [exportLayout, setExportLayout] = useState<RenderLayout>("dynamic");
-  const [exportResolution, setExportResolution] = useState("1080p");
-  const [exportFps, setExportFps] = useState(30);
   const [presenceEvents, setPresenceEvents] = useState<PresenceEvent[]>([]);
   const [offsetsMs, setOffsetsMs] = useState<Record<string, number>>({});
-  const [renderOpen, setRenderOpen] = useState(false);
-  const [rendering, setRendering] = useState(false);
-  const [renderBusyMode, setRenderBusyMode] = useState<RenderMode | null>(
-    null,
-  );
-  const [renderMsg, setRenderMsg] = useState<string | null>(null);
+  const [nleBusy, setNleBusy] = useState(false);
+  const [nleMsg, setNleMsg] = useState<string | null>(null);
+  const [sessionDetailsOpen, setSessionDetailsOpen] = useState(false);
   const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
   const nameInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -488,39 +479,19 @@ export default function Playback() {
     }
   }
 
-  function openRenderDialog() {
-    setExportLayout(previewLayout);
-    setExportResolution(session?.resolution || "1080p");
-    setExportFps(session?.frame_rate || 30);
-    setRenderMsg(null);
-    setRenderOpen(true);
-  }
-
-  async function renderFinal(mode: RenderMode) {
-    if (!id || rendering) return;
-    setRendering(true);
-    setRenderBusyMode(mode);
-    setRenderMsg(
-      mode === "audio"
-        ? "Mixing audio podcast… this can take a minute."
-        : `Rendering ${exportResolution} / ${exportFps}fps video… this can take a minute.`,
-    );
+  async function exportForPremiere() {
+    if (!id || nleBusy) return;
+    setNleBusy(true);
+    setNleMsg(null);
     try {
-      const path = await api.renderSession(id, exportLayout, mode, {
-        resolution: exportResolution,
-        fps: exportFps,
+      await api.exportNleTimeline(id, {
+        resolution: session?.resolution || "1080p",
+        fps: session?.frame_rate || 30,
       });
-      setRenderMsg(`Saved: ${path}`);
-      try {
-        await api.revealSessionFolder(id);
-      } catch {
-        /* ok */
-      }
     } catch (e) {
-      setRenderMsg(String(e).replace(/^Error:\s*/i, ""));
+      setNleMsg(String(e).replace(/^Error:\s*/i, ""));
     } finally {
-      setRendering(false);
-      setRenderBusyMode(null);
+      setNleBusy(false);
     }
   }
 
@@ -531,6 +502,14 @@ export default function Playback() {
     <>
     <div className="editor playback">
       <div className="editor-top">
+        <button
+          type="button"
+          className="bar-btn"
+          onClick={() => navigate("/recordings")}
+        >
+          <IconArrowLeft size={16} stroke={1.75} />
+          Back
+        </button>
         {editingName ? (
           <input
             ref={nameInputRef}
@@ -565,15 +544,6 @@ export default function Playback() {
           {session ? new Date(session.created_at).toLocaleString() : ""}
         </span>
         <div className="spacer" />
-        <button
-          type="button"
-          className="bar-btn bar-btn-primary"
-          disabled={!playable.length || rendering}
-          onClick={openRenderDialog}
-        >
-          <IconMovie size={16} stroke={1.75} />
-          Render
-        </button>
         <button type="button" className="bar-btn" onClick={() => void openFolder()}>
           <IconFolderOpen size={16} stroke={1.75} />
           Folder
@@ -585,14 +555,6 @@ export default function Playback() {
         >
           <IconTrash size={16} stroke={1.75} />
           Delete
-        </button>
-        <button
-          type="button"
-          className="bar-btn"
-          onClick={() => navigate("/recordings")}
-        >
-          <IconArrowLeft size={16} stroke={1.75} />
-          Back
         </button>
       </div>
 
@@ -697,18 +659,21 @@ export default function Playback() {
       <aside className="playback-side">
         <h3>Export</h3>
         <p className="playback-hint">
-          Render a single podcast video with your chosen layout. Presence
-          (join/leave) is preserved automatically.
+          Export an XML sequence for Adobe Premiere Pro with synced ISO tracks.
         </p>
         <button
           type="button"
           className="btn btn-primary playback-render-btn"
-          disabled={!playable.length || rendering}
-          onClick={openRenderDialog}
+          disabled={!playable.length || nleBusy}
+          onClick={() => void exportForPremiere()}
         >
-          <IconMovie size={16} stroke={1.75} />
-          {rendering ? "Rendering…" : "Render"}
+          <IconVideo size={16} stroke={1.75} />
+          {nleBusy ? "Exporting…" : "Export for Premiere"}
         </button>
+        <p className="playback-hint" style={{ marginTop: 8 }}>
+          Then in Premiere: File → Import… and choose the .xml file.
+        </p>
+        {nleMsg && <p className="playback-render-msg">{nleMsg}</p>}
         {hasPresence && (
           <p className="playback-hint" style={{ marginTop: 10 }}>
             {presenceEvents.length} presence event
@@ -716,37 +681,49 @@ export default function Playback() {
           </p>
         )}
 
-        <h3>Session</h3>
-        <dl className="playback-dl">
-          <div>
-            <dt>Title</dt>
-            <dd>{session?.name ?? "—"}</dd>
-          </div>
-          <div>
-            <dt>Duration</dt>
-            <dd>{formatDuration(duration)}</dd>
-          </div>
-          <div>
-            <dt>Quality</dt>
-            <dd>
-              {session?.resolution ?? "—"} · {session?.frame_rate ?? 30}fps
-            </dd>
-          </div>
-          <div>
-            <dt>Mode</dt>
-            <dd>
-              {session?.mode === "audio_only" ? "Audio only" : "Audio + video"}
-            </dd>
-          </div>
-          <div>
-            <dt>Recorded</dt>
-            <dd>
-              {session
-                ? new Date(session.created_at).toLocaleString()
-                : "—"}
-            </dd>
-          </div>
-        </dl>
+        <button
+          type="button"
+          className={`playback-side-toggle${sessionDetailsOpen ? " is-open" : ""}`}
+          aria-expanded={sessionDetailsOpen}
+          onClick={() => setSessionDetailsOpen((v) => !v)}
+        >
+          <span>Session details</span>
+          <IconChevronDown size={16} stroke={2} />
+        </button>
+        {sessionDetailsOpen && (
+          <dl className="playback-dl">
+            <div>
+              <dt>Title</dt>
+              <dd>{session?.name ?? "—"}</dd>
+            </div>
+            <div>
+              <dt>Duration</dt>
+              <dd>{formatDuration(duration)}</dd>
+            </div>
+            <div>
+              <dt>Quality</dt>
+              <dd>
+                {session?.resolution ?? "—"} · {session?.frame_rate ?? 30}fps
+              </dd>
+            </div>
+            <div>
+              <dt>Mode</dt>
+              <dd>
+                {session?.mode === "audio_only"
+                  ? "Audio only"
+                  : "Audio + video"}
+              </dd>
+            </div>
+            <div>
+              <dt>Recorded</dt>
+              <dd>
+                {session
+                  ? new Date(session.created_at).toLocaleString()
+                  : "—"}
+              </dd>
+            </div>
+          </dl>
+        )}
 
         <h3>Who was here</h3>
         <p className="playback-hint">
@@ -806,23 +783,6 @@ export default function Playback() {
         </div>
       </div>
     </div>
-    <RenderPodcastDialog
-      open={renderOpen}
-      layout={exportLayout}
-      resolution={exportResolution}
-      fps={exportFps}
-      busy={rendering}
-      busyMode={renderBusyMode}
-      status={renderMsg}
-      hasPresence={hasPresence}
-      onLayoutChange={setExportLayout}
-      onResolutionChange={setExportResolution}
-      onFpsChange={setExportFps}
-      onClose={() => {
-        if (!rendering) setRenderOpen(false);
-      }}
-      onConfirm={renderFinal}
-    />
     <DeleteRecordingDialog
       open={deleteOpen}
       recordingName={session?.name ?? "this recording"}

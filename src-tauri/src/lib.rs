@@ -1180,6 +1180,48 @@ fn get_session_timeline(
 }
 
 #[tauri::command]
+fn export_nle_timeline(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    resolution: Option<String>,
+    fps: Option<u32>,
+) -> Result<String, String> {
+    let session = state
+        .db
+        .get_session(&session_id)?
+        .ok_or_else(|| "Session not found".to_string())?;
+    let dir = PathBuf::from(&session.local_path);
+    let path = export::export_nle_timeline(
+        &dir,
+        &session.name,
+        resolution.as_deref().unwrap_or(&session.resolution),
+        fps.unwrap_or(session.frame_rate.max(1)),
+    )?;
+    // Reveal the export folder so the user can import the .fcpxml into Resolve.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg("-R")
+            .arg(&path)
+            .spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer")
+            .arg("/select,")
+            .arg(&path)
+            .spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(parent) = path.parent() {
+            let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+        }
+    }
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 async fn render_session(
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
@@ -1632,6 +1674,7 @@ pub fn run() {
             export_session_cmd,
             get_session_timeline,
             render_session,
+            export_nle_timeline,
             list_session_files,
             get_session_media,
             save_session_thumbnail,

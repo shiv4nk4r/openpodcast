@@ -2267,7 +2267,7 @@ a {
   font: inherit;
   font-weight: 700;
   padding: 4px 8px;
-  margin: 0 0 0 -8px;
+  margin: 0;
   border-radius: 8px;
   cursor: text;
   max-width: min(420px, 46vw);
@@ -2290,7 +2290,7 @@ a {
   font: inherit;
   font-weight: 700;
   padding: 4px 8px;
-  margin: 0 0 0 -8px;
+  margin: 0;
   border-radius: 8px;
   min-width: 180px;
   max-width: min(420px, 46vw);
@@ -2324,6 +2324,39 @@ a {
 .playback-side h3 + .playback-hint,
 .playback-side h3 + .playback-people {
   margin-top: 0;
+}
+
+.playback-side-toggle {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  margin: 18px 0 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.playback-side-toggle svg {
+  flex-shrink: 0;
+  transition: transform 140ms ease;
+}
+
+.playback-side-toggle.is-open svg {
+  transform: rotate(180deg);
+}
+
+.playback-side-toggle:hover {
+  color: var(--text);
 }
 
 .playback-side h3:not(:first-child) {
@@ -2423,9 +2456,7 @@ a {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  /* Match ffmpeg studio stage (`--page` dark) so preview ≈ export. */
-  background: #0b0b0d;
-  color: #eef3ff;
+  background: var(--page);
 }
 
 .playback-layout-pills {
@@ -2436,15 +2467,15 @@ a {
   padding: 3px;
   flex-shrink: 0;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(22, 22, 24, 0.92);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
 }
 
 .playback-layout-pill {
   appearance: none;
   border: 0;
   background: transparent;
-  color: #8f8f98;
+  color: var(--text-muted);
   font: inherit;
   font-size: 0.78rem;
   font-weight: 600;
@@ -2458,40 +2489,24 @@ a {
 }
 
 .playback-layout-pill:hover {
-  color: #f4f4f5;
+  color: var(--text);
 }
 
 .playback-layout-pill.is-active {
-  background: rgba(255, 255, 255, 0.1);
-  color: #f4f4f5;
-  box-shadow: none;
+  background: color-mix(in srgb, var(--text) 10%, var(--bg-elevated));
+  color: var(--text);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 8%, transparent);
 }
 
 .playback-stage .editor-canvas {
   flex: 1;
   min-height: 0;
-  background: #0b0b0d;
-}
-
-.playback-stage .tile {
-  background: #222226;
-  border-color: rgba(255, 255, 255, 0.08);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
-  border-radius: 18px;
+  background: var(--page);
 }
 
 .playback-stage .tile .name-tag {
-  background: rgba(12, 12, 14, 0.72);
-  color: #f4f4f5;
-  border-color: rgba(255, 255, 255, 0.14);
   font-family: var(--font);
   font-weight: 600;
-}
-
-.playback-stage .tile .empty,
-.playback-stage .playback-canvas .tile .empty {
-  color: #8f8f98;
-  background: linear-gradient(160deg, #222226, #161618);
 }
 
 .playback-canvas .tile audio {
