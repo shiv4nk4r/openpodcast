@@ -536,8 +536,7 @@ async fn join_studio(
     // Stay connected so the host sees us in the waiting list and can Admit.
     let (stream, host_name) =
         p2p::join_studio(&ticket, display_name.clone(), participant_id.clone()).await?;
-    let session = stream.hold_open(state.preview_tx.clone()).await?;
-    *state.guest_conn.lock() = Some(session);
+    *state.guest_conn.lock() = Some(stream.hold_open(state.preview_tx.clone()));
 
     Ok(serde_json::json!({
         "session_id": session_id,
@@ -564,50 +563,23 @@ async fn send_preview_frame(
         return Ok(());
     }
 
-    // Route PCM and JPEG onto separate QUIC streams so video never blocks audio.
-    let (guest_video, guest_audio) = {
-        let guard = state.guest_conn.lock();
-        match guard.as_ref() {
-            Some(s) => (Some(s.video_send_handle()), Some(s.audio_send_handle())),
-            None => (None, None),
-        }
-    };
-    if let (Some(video), Some(audio)) = (guest_video, guest_audio) {
-        if pcm_b64.is_some() {
-            p2p::send_preview_on(
-                audio,
-                participant_id.clone(),
-                None,
-                pcm_b64.clone(),
-            )
-            .await?;
-        }
-        if jpeg_b64.is_some() {
-            p2p::send_preview_on(video, participant_id, jpeg_b64, None).await?;
-        }
-        return Ok(());
+    // Clone send handle — never take() the session (concurrent invokes).
+    let guest_send = state
+        .guest_conn
+        .lock()
+        .as_ref()
+        .map(|s| s.send_handle());
+    if let Some(send) = guest_send {
+        return p2p::send_preview_on(send, participant_id, jpeg_b64, pcm_b64).await;
     }
 
-    let (video_targets, audio_targets) = {
-        let guard = state.host.lock();
-        match guard.as_ref() {
-            Some(h) => (h.guest_video_handles(), h.guest_audio_handles()),
-            None => (Vec::new(), Vec::new()),
-        }
-    };
-    if pcm_b64.is_some() {
-        p2p::fanout_preview(
-            audio_targets,
-            participant_id.clone(),
-            None,
-            pcm_b64,
-        )
-        .await?;
-    }
-    if jpeg_b64.is_some() {
-        p2p::fanout_preview(video_targets, participant_id, jpeg_b64, None).await?;
-    }
-    Ok(())
+    let targets = state
+        .host
+        .lock()
+        .as_ref()
+        .map(|h| h.guest_send_handles())
+        .unwrap_or_default();
+    p2p::fanout_preview(targets, participant_id, jpeg_b64, pcm_b64).await
 }
 
 #[tauri::command]
