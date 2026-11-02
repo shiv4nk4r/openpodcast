@@ -1,4 +1,5 @@
 import { Navigate, Route, Routes } from "react-router-dom";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import Dashboard from "./pages/Dashboard";
 import CreateStudio from "./pages/CreateStudio";
 import Lobby from "./pages/Lobby";
@@ -56,7 +57,9 @@ export default function App() {
           path="/recordings"
           element={
             <RequireOnboarded>
-              <Dashboard />
+              <ErrorBoundary label="recordings">
+                <Dashboard />
+              </ErrorBoundary>
             </RequireOnboarded>
           }
         />

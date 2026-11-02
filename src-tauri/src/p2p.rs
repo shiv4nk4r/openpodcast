@@ -145,8 +145,14 @@ pub struct TransferEvent {
     pub participant_id: String,
     pub file_name: String,
     pub status: String,
+    /// Bytes sent for the current file (or overall when overall_* set).
     pub bytes_received: u64,
     pub total_bytes: u64,
+    /// Aggregate across all files in this sync (preferred for UI %).
+    #[serde(default)]
+    pub overall_bytes: u64,
+    #[serde(default)]
+    pub overall_total: u64,
 }
 
 pub type PreviewBus = tokio::sync::broadcast::Sender<PreviewEvent>;
@@ -806,6 +812,8 @@ async fn handle_guest(
                                     status: "receiving".into(),
                                     bytes_received: start,
                                     total_bytes: size,
+                                    overall_bytes: start,
+                                    overall_total: size,
                                 });
                             }
                             Err(e) => tracing::warn!("open track file failed: {e}"),
@@ -833,6 +841,8 @@ async fn handle_guest(
                                         status: "receiving".into(),
                                         bytes_received: *received,
                                         total_bytes: *total,
+                                        overall_bytes: *received,
+                                        overall_total: *total,
                                     });
                                 }
                                 Err(e) => tracing::warn!("bad track chunk: {e}"),
@@ -851,6 +861,8 @@ async fn handle_guest(
                                 status: "done".into(),
                                 bytes_received: received,
                                 total_bytes: total,
+                                overall_bytes: received,
+                                overall_total: total,
                             });
                         }
                     }
@@ -1139,7 +1151,8 @@ pub async fn send_file_on(
     path: &PathBuf,
     resume_from: u64,
     progress_key: Option<(String, String)>,
-    progress_tx: Option<TransferBus>,
+    // (bus, bytes already completed before this file, grand total of all files)
+    progress_tx: Option<(TransferBus, u64, u64)>,
 ) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -1207,13 +1220,16 @@ pub async fn send_file_on(
     let mut offset = resume_from;
     let mut since_persist = 0u64;
     let emit = |bytes: u64, status: &str| {
-        if let Some(tx) = progress_tx.as_ref() {
+        if let Some((tx, base, grand)) = progress_tx.as_ref() {
+            let overall = base.saturating_add(bytes);
             let _ = tx.send(TransferEvent {
                 participant_id: participant_id.to_string(),
                 file_name: file_name.clone(),
                 status: status.into(),
                 bytes_received: bytes,
                 total_bytes: size,
+                overall_bytes: overall,
+                overall_total: (*grand).max(1),
             });
         }
     };

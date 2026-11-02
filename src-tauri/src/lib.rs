@@ -1446,25 +1446,38 @@ async fn return_local_tracks(
         )
     };
 
+    let mut sizes: Vec<u64> = Vec::with_capacity(paths.len());
+    for path in &paths {
+        let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        sizes.push(len);
+    }
+    let grand_total: u64 = sizes.iter().sum::<u64>().max(1);
+    let mut completed_before: u64 = 0;
     let mut sent = Vec::new();
-    for path in paths {
+    for (idx, path) in paths.iter().enumerate() {
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("track.bin")
             .to_string();
         let resume = offsets.get(&name).copied().unwrap_or(0);
+        let file_size = sizes.get(idx).copied().unwrap_or(0);
         match p2p::send_file_on(
             send.clone(),
             &participant_id,
-            &path,
+            path,
             resume,
             Some((pending_id.clone(), name.clone())),
-            Some(state.transfer_tx.clone()),
+            Some((
+                state.transfer_tx.clone(),
+                completed_before,
+                grand_total,
+            )),
         )
         .await
         {
             Ok(()) => {
+                completed_before = completed_before.saturating_add(file_size);
                 sent.push(name);
             }
             Err(e) => {

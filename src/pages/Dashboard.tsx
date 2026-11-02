@@ -14,6 +14,13 @@ import {
 } from "@tabler/icons-react";
 import { api } from "../api";
 import { DeleteRecordingDialog } from "../components/DeleteRecordingDialog";
+import { TransferProgressBar } from "../components/TransferProgressBar";
+import {
+  computeTransferStats,
+  pushSample,
+  type TransferSample,
+  type TransferStats,
+} from "../lib/transferProgress";
 import { useApp } from "../state";
 import type { SessionRecord } from "../types";
 
@@ -31,8 +38,10 @@ type SyncProgress = {
   sessionId: string;
   bytes: number;
   total: number;
+  fileName?: string;
   status: "sending" | "done" | "error";
   error?: string;
+  samples: TransferSample[];
 };
 
 function formatDuration(secs: number) {
@@ -41,11 +50,23 @@ function formatDuration(secs: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-function formatBytes(n: number) {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+function statsFor(prog: SyncProgress | undefined, done: boolean): TransferStats {
+  if (done) {
+    const total = prog?.total || prog?.bytes || 1;
+    return {
+      bytes: total,
+      total,
+      pct: 100,
+      bytesPerSec: 0,
+      etaSec: 0,
+    };
+  }
+  if (!prog) {
+    return { bytes: 0, total: 1, pct: 0, bytesPerSec: 0, etaSec: null };
+  }
+  return computeTransferStats(prog.samples.length ? prog.samples : [
+    { bytes: prog.bytes, total: prog.total, at: Date.now() },
+  ]);
 }
 
 function SyncRing({
@@ -67,15 +88,18 @@ function SyncRing({
   const stroke = 3;
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
-  const clamped = Math.min(1, Math.max(0, frac));
+  const clamped = Number.isFinite(frac)
+    ? Math.min(1, Math.max(0, frac))
+    : 0;
   const dash = c * clamped;
+  const gap = Math.max(0, c - dash);
   return (
     <button
       type="button"
       className={`rs-rec-sync${busy ? " is-busy" : ""}${done ? " is-done" : ""}`}
       title={title}
       aria-label={title}
-      disabled={disabled || (busy && !done)}
+      disabled={Boolean(disabled || (busy && !done))}
       onClick={onClick}
     >
       <svg
@@ -101,13 +125,13 @@ function SyncRing({
             r={r}
             fill="none"
             strokeWidth={stroke}
-            strokeDasharray={`${dash} ${c - dash}`}
+            strokeDasharray={`${dash} ${gap}`}
             strokeLinecap="round"
             transform={`rotate(-90 ${size / 2} ${size / 2})`}
           />
         )}
       </svg>
-      <span className="rs-rec-sync-icon">
+      <span className="rs-rec-sync-icon" aria-hidden>
         {done ? (
           <IconCheck size={14} stroke={2.25} />
         ) : (
@@ -119,7 +143,8 @@ function SyncRing({
 }
 
 export default function Dashboard() {
-  const { sessions, refreshSessions } = useApp();
+  const { sessions: sessionsRaw, refreshSessions } = useApp();
+  const sessions = Array.isArray(sessionsRaw) ? sessionsRaw : [];
   const navigate = useNavigate();
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -135,11 +160,13 @@ export default function Dashboard() {
   >({});
   const [syncedIds, setSyncedIds] = useState<Record<string, boolean>>({});
   const activeSyncSession = useRef<string | null>(null);
+  const samplesRef = useRef<Record<string, TransferSample[]>>({});
   const nameInputRef = useRef<HTMLInputElement | null>(null);
 
   async function refreshPending() {
     try {
-      setPendingTransfers(await api.listPendingTransfers());
+      const list = await api.listPendingTransfers();
+      setPendingTransfers(Array.isArray(list) ? list : []);
     } catch {
       setPendingTransfers([]);
     }
@@ -161,23 +188,38 @@ export default function Dashboard() {
           status: string;
           bytes_received: number;
           total_bytes: number;
+          overall_bytes?: number;
+          overall_total?: number;
         }>("studio-transfer", (ev) => {
           const sessionId = activeSyncSession.current;
           if (!sessionId || !ev.payload) return;
           const p = ev.payload;
-          const total = Math.max(1, p.total_bytes || 1);
+          const total = Math.max(
+            1,
+            p.overall_total || p.total_bytes || 1,
+          );
+          const bytes = Math.min(
+            total,
+            p.overall_bytes || p.bytes_received || 0,
+          );
+          const samples = pushSample(
+            samplesRef.current[sessionId] ?? [],
+            bytes,
+            total,
+          );
+          samplesRef.current[sessionId] = samples;
           setSyncProgress((prev) => ({
             ...prev,
             [sessionId]: {
               sessionId,
-              bytes: p.bytes_received,
+              bytes,
               total,
+              fileName: p.file_name,
+              samples,
               status:
-                p.status === "done"
-                  ? "done"
-                  : p.status === "error"
-                    ? "error"
-                    : "sending",
+                p.status === "error"
+                  ? "error"
+                  : "sending",
             },
           }));
         });
@@ -285,13 +327,16 @@ export default function Dashboard() {
 
   async function syncToHost(item: PendingTransfer) {
     if (activeSyncSession.current) return;
-    activeSyncSession.current = item.local_session_id;
+    const sid = item.local_session_id;
+    activeSyncSession.current = sid;
+    samplesRef.current[sid] = [];
     setSyncProgress((prev) => ({
       ...prev,
-      [item.local_session_id]: {
-        sessionId: item.local_session_id,
+      [sid]: {
+        sessionId: sid,
         bytes: 0,
         total: 1,
+        samples: [],
         status: "sending",
       },
     }));
@@ -302,25 +347,31 @@ export default function Dashboard() {
         item.invite,
         item.host_session_id,
       );
-      setSyncedIds((prev) => ({ ...prev, [item.local_session_id]: true }));
-      setSyncProgress((prev) => ({
-        ...prev,
-        [item.local_session_id]: {
-          sessionId: item.local_session_id,
-          bytes: 1,
-          total: 1,
-          status: "done",
-        },
-      }));
+      setSyncedIds((prev) => ({ ...prev, [sid]: true }));
+      setSyncProgress((prev) => {
+        const cur = prev[sid];
+        const total = Math.max(1, cur?.total ?? 1);
+        return {
+          ...prev,
+          [sid]: {
+            sessionId: sid,
+            bytes: total,
+            total,
+            samples: cur?.samples ?? [],
+            status: "done",
+          },
+        };
+      });
       await refreshPending();
     } catch (e) {
       const msg = String(e).replace(/^Error:\s*/i, "");
       setSyncProgress((prev) => ({
         ...prev,
-        [item.local_session_id]: {
-          sessionId: item.local_session_id,
-          bytes: prev[item.local_session_id]?.bytes ?? 0,
-          total: prev[item.local_session_id]?.total ?? 1,
+        [sid]: {
+          sessionId: sid,
+          bytes: prev[sid]?.bytes ?? 0,
+          total: prev[sid]?.total ?? 1,
+          samples: prev[sid]?.samples ?? [],
           status: "error",
           error: msg,
         },
@@ -337,12 +388,13 @@ export default function Dashboard() {
   function syncUiForSession(sessionId: string) {
     const pending = pendingBySession.get(sessionId);
     const prog = syncProgress[sessionId];
-    const done = syncedIds[sessionId] && !pending;
+    const done = Boolean(syncedIds[sessionId] && !pending) || prog?.status === "done";
     const busy = prog?.status === "sending";
-    const frac =
-      prog && prog.total > 0 ? prog.bytes / prog.total : busy ? 0.05 : done ? 1 : 0;
+    const failed = prog?.status === "error";
+    const stats = statsFor(prog, done);
+    const frac = done ? 1 : stats.pct / 100;
     const title = busy
-      ? `Syncing to host — ${formatBytes(prog?.bytes ?? 0)} / ${formatBytes(prog?.total ?? 0)}`
+      ? `Syncing — ${Math.round(stats.pct)}%`
       : done
         ? "Synced to host"
         : pending
@@ -350,7 +402,7 @@ export default function Dashboard() {
             ? `Sync to host (resume) — ${pending.last_error}`
             : "Sync to host"
           : "Nothing queued to sync";
-    return { pending, prog, done, busy, frac, title };
+    return { pending, prog, done, busy, failed, frac, title, stats };
   }
 
   return (
@@ -399,29 +451,42 @@ export default function Dashboard() {
             <ul className="rs-pending-list">
               {orphanPending.map((item) => {
                 const ui = syncUiForSession(item.local_session_id);
+                const fileCount = Array.isArray(item.file_names)
+                  ? item.file_names.length
+                  : 0;
                 return (
-                  <li key={item.id} className="rs-pending-item">
-                    <div>
-                      <strong>
-                        {item.file_names.length} file
-                        {item.file_names.length === 1 ? "" : "s"}
-                      </strong>
-                      <span>
-                        {ui.busy
-                          ? `${formatBytes(ui.prog?.bytes ?? 0)} / ${formatBytes(ui.prog?.total ?? 0)}`
-                          : item.last_error || "Waiting to sync"}
-                      </span>
+                  <li key={item.id} className="rs-pending-item is-stack">
+                    <div className="rs-pending-item-head">
+                      <div>
+                        <strong>
+                          {fileCount} file
+                          {fileCount === 1 ? "" : "s"}
+                        </strong>
+                        <span>
+                          {ui.busy || ui.failed
+                            ? ui.prog?.fileName || "Uploading…"
+                            : item.last_error || "Waiting to sync"}
+                        </span>
+                      </div>
+                      <div className="rs-pending-actions">
+                        <SyncRing
+                          frac={ui.frac}
+                          busy={!!ui.busy}
+                          done={!!ui.done}
+                          title={ui.title}
+                          disabled={!ui.pending && !ui.busy}
+                          onClick={() => void syncToHost(item)}
+                        />
+                      </div>
                     </div>
-                    <div className="rs-pending-actions">
-                      <SyncRing
-                        frac={ui.frac}
-                        busy={ui.busy}
+                    {(ui.busy || ui.failed || ui.done) && (
+                      <TransferProgressBar
+                        stats={ui.stats}
                         done={ui.done}
-                        title={ui.title}
-                        disabled={!ui.pending && !ui.busy}
-                        onClick={() => void syncToHost(item)}
+                        error={ui.failed ? ui.prog?.error : null}
+                        label="Syncing to host"
                       />
-                    </div>
+                    )}
                   </li>
                 );
               })}
@@ -447,7 +512,10 @@ export default function Dashboard() {
             {sessions.map((s) => {
               const ui = syncUiForSession(s.id);
               return (
-                <div key={s.id} className="rs-rec-card">
+                <div
+                  key={s.id}
+                  className={`rs-rec-card${ui.busy ? " is-syncing" : ""}`}
+                >
                   <button
                     type="button"
                     className="rs-rec-thumb"
@@ -470,7 +538,10 @@ export default function Dashboard() {
                     </span>
                     {ui.busy && (
                       <span className="rs-rec-sync-badge">
-                        {Math.round(ui.frac * 100)}%
+                        {ui.stats.pct < 10
+                          ? ui.stats.pct.toFixed(1)
+                          : Math.round(ui.stats.pct)}
+                        %
                       </span>
                     )}
                   </button>
@@ -509,13 +580,11 @@ export default function Dashboard() {
                       <span>
                         {formatDuration(s.duration_secs)} · {s.resolution} ·{" "}
                         {new Date(s.created_at).toLocaleDateString()}
-                        {ui.busy
-                          ? ` · Syncing ${Math.round(ui.frac * 100)}%`
-                          : ui.done
-                            ? " · Synced to host"
-                            : ui.pending
-                              ? " · Needs sync"
-                              : ""}
+                        {ui.done
+                          ? " · Synced to host"
+                          : ui.pending
+                            ? " · Needs sync"
+                            : ""}
                       </span>
                       <div className="rs-rec-meta-actions">
                         <SyncRing
@@ -539,6 +608,18 @@ export default function Dashboard() {
                         </button>
                       </div>
                     </div>
+                    {(ui.busy || ui.failed) && (
+                      <TransferProgressBar
+                        stats={ui.stats}
+                        done={false}
+                        error={ui.failed ? ui.prog?.error : null}
+                        label={
+                          ui.prog?.fileName
+                            ? `Sending ${ui.prog.fileName}`
+                            : "Syncing to host"
+                        }
+                      />
+                    )}
                   </div>
                 </div>
               );

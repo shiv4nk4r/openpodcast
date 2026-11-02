@@ -32,12 +32,19 @@ import {
 import { api } from "../api";
 import { LiveCameraPreview } from "../components/LiveCameraPreview";
 import { Select } from "../components/Select";
+import { TransferProgressBar } from "../components/TransferProgressBar";
 import { pickPreferred, useDeviceList } from "../hooks/useDeviceList";
 import { blobToBytes, blobToUint8, useLocalMedia } from "../hooks/useLocalMedia";
 import {
   useRemotePeerVideo,
   useStudioPreview,
 } from "../hooks/useStudioPreview";
+import {
+  computeTransferStats,
+  pushSample,
+  type TransferSample,
+  type TransferStats,
+} from "../lib/transferProgress";
 import { useApp } from "../state";
 import type { PeerInfo } from "../types";
 
@@ -170,6 +177,16 @@ export default function Recording() {
   >("idle");
   const [transferMsg, setTransferMsg] = useState("");
   const [resumingTransfer, setResumingTransfer] = useState(false);
+  const [xferStats, setXferStats] = useState<TransferStats>({
+    bytes: 0,
+    total: 1,
+    pct: 0,
+    bytesPerSec: 0,
+    etaSec: null,
+  });
+  const [xferFile, setXferFile] = useState<string | null>(null);
+  const xferSamplesRef = useRef<TransferSample[]>([]);
+  const xferListeningRef = useRef(false);
   const [sharing, setSharing] = useState(false);
   const [speakerOpen, setSpeakerOpen] = useState(false);
   const [echo, setEcho] = useState(settings.echo_cancellation);
@@ -810,6 +827,46 @@ export default function Recording() {
     setTransferStatus("sending");
     setTransferMsg("Sending your high-quality video to the host…");
     setResumingTransfer(true);
+    xferSamplesRef.current = [];
+    setXferFile(null);
+    setXferStats({
+      bytes: 0,
+      total: 1,
+      pct: 0,
+      bytesPerSec: 0,
+      etaSec: null,
+    });
+
+    let unlisten: (() => void) | undefined;
+    xferListeningRef.current = true;
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen<{
+        file_name: string;
+        status: string;
+        bytes_received: number;
+        total_bytes: number;
+        overall_bytes?: number;
+        overall_total?: number;
+      }>("studio-transfer", (ev) => {
+        if (!xferListeningRef.current || !ev.payload) return;
+        const p = ev.payload;
+        const total = Math.max(1, p.overall_total || p.total_bytes || 1);
+        const bytes = Math.min(total, p.overall_bytes || p.bytes_received || 0);
+        xferSamplesRef.current = pushSample(
+          xferSamplesRef.current,
+          bytes,
+          total,
+        );
+        const stats = computeTransferStats(xferSamplesRef.current);
+        setXferStats(stats);
+        setXferFile(p.file_name || null);
+        setUploadFrac(Math.max(0.05, stats.pct / 100));
+      });
+    } catch {
+      /* browser preview */
+    }
+
     try {
       await api.enqueueTrackReturn(
         active.sessionId,
@@ -824,6 +881,12 @@ export default function Recording() {
         hostSid,
       );
       setUploadFrac(1);
+      setXferStats((s) => ({
+        ...s,
+        bytes: s.total,
+        pct: 100,
+        etaSec: 0,
+      }));
       setTransferStatus("done");
       setTransferMsg("Host has your full-quality tracks.");
     } catch (e) {
@@ -835,6 +898,8 @@ export default function Recording() {
           "Could not reach the host. Your file is safe on this Mac.",
       );
     } finally {
+      xferListeningRef.current = false;
+      unlisten?.();
       setResumingTransfer(false);
     }
   }
@@ -1607,9 +1672,33 @@ export default function Recording() {
                   ? "Your full-quality video stays on this computer until the host has a copy."
                   : "Guest high-quality videos arrive here when they finish sending.")}
             </p>
-            <div className="level-meter" style={{ margin: "16px 0" }}>
-              <span style={{ width: `${Math.max(uploadFrac, 0.05) * 100}%` }} />
-            </div>
+            {active.role === "guest" &&
+            (transferStatus === "sending" ||
+              transferStatus === "done" ||
+              transferStatus === "failed") ? (
+              <div style={{ margin: "16px 0" }}>
+                <TransferProgressBar
+                  stats={
+                    transferStatus === "done"
+                      ? { ...xferStats, pct: 100, etaSec: 0 }
+                      : xferStats
+                  }
+                  done={transferStatus === "done"}
+                  error={
+                    transferStatus === "failed" ? transferMsg : null
+                  }
+                  label={
+                    xferFile ? `Sending ${xferFile}` : "Syncing to host"
+                  }
+                />
+              </div>
+            ) : (
+              <div className="level-meter" style={{ margin: "16px 0" }}>
+                <span
+                  style={{ width: `${Math.max(uploadFrac, 0.05) * 100}%` }}
+                />
+              </div>
+            )}
             <div className="rs-transfer-actions">
               {active.role === "guest" && transferStatus !== "saving" && (
                 <button

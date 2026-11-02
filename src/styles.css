@@ -1092,6 +1092,95 @@ a {
   border: 1px solid var(--hairline);
 }
 
+.rs-pending-item.is-stack {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.rs-pending-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rs-xfer {
+  margin-top: 10px;
+  width: 100%;
+}
+
+.rs-xfer-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.rs-xfer-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ink-soft, var(--ink));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.rs-xfer-pct {
+  font-size: 0.82rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  flex-shrink: 0;
+}
+
+.rs-xfer-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--meter-track, color-mix(in srgb, var(--ink) 12%, transparent));
+  overflow: hidden;
+}
+
+.rs-xfer-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent, #3b82f6) 80%, #22c55e),
+    var(--accent, #3b82f6)
+  );
+  transition: width 0.2s ease-out;
+}
+
+.rs-xfer.is-done .rs-xfer-fill {
+  background: var(--green, #1a7f4b);
+}
+
+.rs-xfer.is-error .rs-xfer-fill {
+  background: color-mix(in srgb, var(--record, #e11d48) 70%, var(--ink));
+}
+
+.rs-xfer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 6px;
+  font-size: 0.78rem;
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.rs-xfer-error {
+  color: var(--record, #e11d48);
+}
+
+.rs-rec-card.is-syncing .rs-rec-meta {
+  gap: 8px;
+}
+
 .rs-pending-item strong {
   display: block;
   margin-bottom: 4px;
@@ -1267,6 +1356,33 @@ a {
   background: color-mix(in srgb, var(--record) 14%, transparent);
 }
 
+.rs-error-boundary {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 32px;
+  color: var(--ink);
+  background: var(--page);
+}
+
+.rs-error-boundary h1 {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+.rs-error-boundary p {
+  margin: 0 0 8px;
+  color: var(--ink-muted);
+  max-width: 420px;
+}
+
+.rs-error-boundary .btn {
+  min-width: 160px;
+}
+
 .rs-rec-sync {
   appearance: none;
   border: 0;
@@ -1275,8 +1391,9 @@ a {
   width: 34px;
   height: 34px;
   border-radius: 999px;
-  display: inline-grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   position: relative;
   flex-shrink: 0;
   cursor: pointer;
@@ -1301,7 +1418,8 @@ a {
 }
 
 .rs-rec-sync-ring {
-  grid-area: 1 / 1;
+  position: absolute;
+  inset: 0;
   display: block;
 }
 
@@ -1315,7 +1433,8 @@ a {
 }
 
 .rs-rec-sync-icon {
-  grid-area: 1 / 1;
+  position: relative;
+  z-index: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
