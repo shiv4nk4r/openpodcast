@@ -78,6 +78,8 @@ export interface StudioRuntime {
   sessionId: string;
   participantId: string;
   invite?: string;
+  /** Present for guests — the host's display name from the invite. */
+  hostName?: string;
   settings: StudioSettings;
   displayName: string;
 }

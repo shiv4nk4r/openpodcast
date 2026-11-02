@@ -56,7 +56,8 @@ export const api = {
       studio: StudioSettings;
       host_name: string;
       connected: boolean;
-      local_path: string;
+      draft_path?: string;
+      local_path?: string;
     }>("join_studio", { invite, displayName }),
   listAudioDevices: () => invoke<DeviceInfo[]>("list_audio_devices"),
   startAudioRecording: (

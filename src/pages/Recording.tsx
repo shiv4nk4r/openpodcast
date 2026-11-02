@@ -208,6 +208,18 @@ export default function Recording() {
       resolution: studio?.settings.resolution ?? "1080p",
       admitted: true,
     };
+    if (studio?.role === "guest") {
+      return [
+        self,
+        {
+          id: "host",
+          name: studio.hostName || "Host",
+          role: "Host",
+          resolution: studio.settings.resolution ?? "1080p",
+          admitted: true,
+        },
+      ];
+    }
     return [self, ...peers.filter((p) => p.admitted)];
   }, [studio, peers]);
 
@@ -1010,7 +1022,13 @@ export default function Recording() {
                           type="button"
                           className="rs-copy-btn"
                           style={{ marginTop: 10 }}
-                          onClick={() => void api.admitGuest(g.id)}
+                          onClick={() => {
+                            void (async () => {
+                              await api.admitGuest(g.id);
+                              const list = await api.listPeers();
+                              setPeers(list);
+                            })();
+                          }}
                         >
                           Admit
                         </button>

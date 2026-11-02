@@ -101,7 +101,7 @@ pub struct PeerStream {
     _endpoint: Endpoint,
     _conn: iroh::endpoint::Connection,
     send: iroh::endpoint::SendStream,
-    _recv: iroh::endpoint::RecvStream,
+    recv: iroh::endpoint::RecvStream,
 }
 
 pub struct StudioHost {
@@ -162,6 +162,15 @@ impl StudioHost {
         let peers_c = peers.clone();
         let password_c = password.clone();
         let ep_accept = endpoint.clone();
+        let ep_keepalive = endpoint.clone();
+
+        // Keep the relay registration warm so invites stay dialable.
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                let _ = tokio::time::timeout(Duration::from_secs(8), ep_keepalive.online()).await;
+            }
+        });
 
         tokio::spawn(async move {
             loop {
@@ -369,11 +378,23 @@ pub async fn join_studio(
             },
         )
         .await?;
+        // Wait until the host registers us (do not drop before this — that raced
+        // and left both sides thinking nobody else was in the studio).
+        let mut recv = recv;
+        match read_frame(&mut recv).await? {
+            PeerMessage::Waiting { .. } => {}
+            PeerMessage::Deny { reason } => {
+                return Err(reason);
+            }
+            other => {
+                return Err(format!("Unexpected host response while joining: {other:?}"));
+            }
+        }
         Ok::<_, String>(PeerStream {
             _endpoint: endpoint.clone(),
             _conn: conn,
             send,
-            _recv: recv,
+            recv,
         })
     };
 

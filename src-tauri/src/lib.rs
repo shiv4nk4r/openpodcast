@@ -122,6 +122,8 @@ fn grant_webview_media_permissions(win: &tauri::WebviewWindow) {
 pub struct AppState {
     pub db: Database,
     pub host: Mutex<Option<StudioHost>>,
+    /// Guest keeps this open so the host can admit them and keep the session alive.
+    pub guest_conn: Mutex<Option<p2p::PeerStream>>,
     pub recorders: Mutex<HashMap<String, AudioRecorder>>,
     pub active_session: Mutex<Option<String>>,
     /// session_id → Recordings/... folder (created when Record starts)
@@ -135,6 +137,7 @@ impl AppState {
         Ok(Self {
             db: Database::open()?,
             host: Mutex::new(None),
+            guest_conn: Mutex::new(None),
             recorders: Mutex::new(HashMap::new()),
             active_session: Mutex::new(None),
             session_dirs: Mutex::new(HashMap::new()),
@@ -464,9 +467,9 @@ async fn join_studio(
     let draft = write_draft_sync(&state, &session_id, &sync)?;
     *state.active_session.lock() = Some(session_id.clone());
 
-    // Prove we can reach the host (registers the guest). Control/file channels reconnect as needed.
-    let _stream = p2p::join_studio(&ticket, display_name.clone(), participant_id.clone()).await?;
-    drop(_stream);
+    // Stay connected so the host sees us in the waiting list and can Admit.
+    let stream = p2p::join_studio(&ticket, display_name.clone(), participant_id.clone()).await?;
+    *state.guest_conn.lock() = Some(stream);
 
     Ok(serde_json::json!({
         "session_id": session_id,
@@ -780,6 +783,7 @@ fn leave_studio(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     if let Some(host) = state.host.lock().take() {
         host.shutdown();
     }
+    *state.guest_conn.lock() = None;
     state.recorders.lock().clear();
     *state.active_session.lock() = None;
     Ok(())

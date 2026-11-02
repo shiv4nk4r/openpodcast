@@ -257,6 +257,8 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
         participantId: res.participant_id,
         settings: res.studio,
         displayName,
+        hostName: res.host_name || "Host",
+        invite: ticket,
       });
       navigate("/studio");
     } catch (e) {
