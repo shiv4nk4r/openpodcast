@@ -111,17 +111,31 @@ export default function Settings() {
       previewStream.current = null;
       if (!cameraId && !micId) return;
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: cameraId ? { deviceId: { exact: cameraId } } : false,
-          audio: micId
+        const audio =
+          micId
             ? {
-                deviceId: { exact: micId },
+                deviceId: { ideal: micId },
                 echoCancellation: echo,
                 noiseSuppression: false,
                 autoGainControl: true,
               }
-            : false,
-        });
+            : false;
+        const video = cameraId ? { deviceId: { ideal: cameraId } } : false;
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio, video });
+        } catch {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: micId
+              ? {
+                  echoCancellation: echo,
+                  noiseSuppression: false,
+                  autoGainControl: true,
+                }
+              : false,
+            video: cameraId ? true : false,
+          });
+        }
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop());
           return;

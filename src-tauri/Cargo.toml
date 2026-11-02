@@ -43,6 +43,11 @@ bytes = "1"
 tracing = "0.1"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+windows = "0.62"
+windows-core = "0.62"
+
 [profile.release]
 codegen-units = 1
 lto = true

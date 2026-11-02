@@ -17,8 +17,107 @@ use p2p::StudioHost;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::State;
+use tauri::webview::{PermissionKind, PermissionResponse};
+use tauri::{State, WebviewWindowBuilder};
 use uuid::Uuid;
+
+/// Origins served by this app (Vite in `tauri dev`, custom protocol in release).
+#[cfg(windows)]
+fn is_app_origin(uri: &str) -> bool {
+    let rest = match uri
+        .strip_prefix("https://")
+        .or_else(|| uri.strip_prefix("http://"))
+    {
+        Some(rest) => rest,
+        None => return false,
+    };
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    host == "tauri.localhost" || host == "localhost" || host == "127.0.0.1"
+}
+
+/// WebView2 needs an explicit PermissionRequested answer for mic/camera.
+/// macOS WKWebView already grants media capture by default in wry.
+#[cfg(windows)]
+fn grant_webview_media_permissions(win: &tauri::WebviewWindow) {
+    let _ = win.with_webview(|webview| {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            ICoreWebView2_13, ICoreWebView2Profile4, COREWEBVIEW2_PERMISSION_KIND_CAMERA,
+            COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
+            COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION,
+            COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+        };
+        use webview2_com::{
+            take_pwstr, PermissionRequestedEventHandler, SetPermissionStateCompletedHandler,
+        };
+        use windows::core::{Interface, w};
+        use windows_core::PCWSTR;
+
+        let Ok(core) = (unsafe { webview.controller().CoreWebView2() }) else {
+            return;
+        };
+
+        // Override any previously persisted Deny so getUserMedia works again.
+        if let Ok(core13) = core.cast::<ICoreWebView2_13>() {
+            if let Ok(profile) = unsafe { core13.Profile() } {
+                if let Ok(profile4) = profile.cast::<ICoreWebView2Profile4>() {
+                    let done = SetPermissionStateCompletedHandler::create(Box::new(|_| Ok(())));
+                    let origins = [
+                        w!("http://localhost:1420/"),
+                        w!("https://tauri.localhost/"),
+                        w!("http://tauri.localhost/"),
+                        w!("http://127.0.0.1:1420/"),
+                    ];
+                    for origin in origins {
+                        for kind in [
+                            COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
+                            COREWEBVIEW2_PERMISSION_KIND_CAMERA,
+                        ] {
+                            let _ = unsafe {
+                                profile4.SetPermissionState(
+                                    kind,
+                                    PCWSTR(origin.as_ptr()),
+                                    COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+                                    &done,
+                                )
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        let handler = PermissionRequestedEventHandler::create(Box::new(
+            move |_sender, args| -> windows_core::Result<()> {
+                let Some(args) = args else {
+                    return Ok(());
+                };
+                unsafe {
+                    let mut kind = COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION;
+                    args.PermissionKind(&mut kind)?;
+                    if kind != COREWEBVIEW2_PERMISSION_KIND_MICROPHONE
+                        && kind != COREWEBVIEW2_PERMISSION_KIND_CAMERA
+                    {
+                        return Ok(());
+                    }
+                    let mut uri = windows_core::PWSTR::null();
+                    args.Uri(&mut uri)?;
+                    if is_app_origin(&take_pwstr(uri)) {
+                        args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
+                    }
+                }
+                Ok(())
+            },
+        ));
+        let mut token = 0i64;
+        let _ = unsafe { core.add_PermissionRequested(&handler, &mut token) };
+    });
+}
 
 pub struct AppState {
     pub db: Database,
@@ -1125,7 +1224,24 @@ pub fn run() {
             return_tracks_to_host,
         ])
         .setup(|app| {
-            let _ = app;
+            let conf = app
+                .config()
+                .app
+                .windows
+                .first()
+                .cloned()
+                .expect("main window config missing");
+            let window = WebviewWindowBuilder::from_config(app.handle(), &conf)?
+                .on_permission_request(|_webview, kind| match kind {
+                    PermissionKind::Microphone | PermissionKind::Camera => {
+                        PermissionResponse::Allow
+                    }
+                    _ => PermissionResponse::Default,
+                })
+                .build()?;
+            #[cfg(windows)]
+            grant_webview_media_permissions(&window);
+            let _ = window;
             Ok(())
         })
         .run(tauri::generate_context!())

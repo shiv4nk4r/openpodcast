@@ -16,19 +16,19 @@ function labelFor(d: MediaDeviceInfo, index: number): string {
 }
 
 async function ensurePermission(): Promise<void> {
+  // Ask for mic first — on Windows WebView2 a combined cam+mic prompt often
+  // fails entirely when camera is blocked, which also hides microphone labels.
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: true,
-    });
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     stream.getTracks().forEach((t) => t.stop());
   } catch {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getTracks().forEach((t) => t.stop());
-    } catch {
-      /* labels may stay empty until permission is granted */
-    }
+    /* labels may stay empty until permission is granted */
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    stream.getTracks().forEach((t) => t.stop());
+  } catch {
+    /* camera optional */
   }
 }
 

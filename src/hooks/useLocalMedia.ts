@@ -98,29 +98,59 @@ export function useLocalMedia(opts: {
         streamRef.current?.getTracks().forEach((t) => t.stop());
         const size = resolutionToSize(opts.resolution ?? "1080p");
         const fps = opts.frameRate && opts.frameRate > 0 ? opts.frameRate : 30;
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: opts.audio
+        const audioConstraints = (
+          preferDevice: boolean,
+        ): MediaTrackConstraints | false =>
+          opts.audio
             ? {
-                deviceId: deviceIds?.audio
-                  ? { exact: deviceIds.audio }
-                  : undefined,
+                ...(preferDevice && deviceIds?.audio
+                  ? { deviceId: { ideal: deviceIds.audio } }
+                  : {}),
                 echoCancellation: opts.echoCancellation ?? true,
                 // NS ducks speech; AGC lifts quiet mics into a usable range
                 noiseSuppression: false,
                 autoGainControl: true,
               }
-            : false,
-          video: opts.video
+            : false;
+        const videoConstraints = (
+          preferDevice: boolean,
+        ): MediaTrackConstraints | false =>
+          opts.video
             ? {
-                deviceId: deviceIds?.video
-                  ? { exact: deviceIds.video }
-                  : undefined,
+                ...(preferDevice && deviceIds?.video
+                  ? { deviceId: { ideal: deviceIds.video } }
+                  : {}),
                 width: { ideal: size.width },
                 height: { ideal: size.height },
                 frameRate: { ideal: fps },
               }
-            : false,
-        });
+            : false;
+
+        // Prefer selected devices, then any device, then audio-only if video fails.
+        // WebView2 on Windows is stricter about OverconstrainedError / NotAllowedError.
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: audioConstraints(true),
+            video: videoConstraints(true),
+          });
+        } catch (first) {
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              audio: audioConstraints(false),
+              video: videoConstraints(false),
+            });
+          } catch (second) {
+            if (opts.audio && opts.video) {
+              stream = await navigator.mediaDevices.getUserMedia({
+                audio: audioConstraints(false),
+                video: false,
+              });
+            } else {
+              throw second ?? first;
+            }
+          }
+        }
         streamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.controls = false;
