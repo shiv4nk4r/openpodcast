@@ -14,6 +14,16 @@ dist-bundles
 *.local
 src-tauri/target
 .cargo-target
+scripts/sign-env.sh
+# Signing secrets — keep .cer backups; never commit private keys / API keys
+signing/*.key
+signing/*.p12
+signing/*.pem
+signing/*.p8
+signing/AuthKey_*.p8
+!signing/*.cer
+!signing/*.certSigningRequest
+!signing/README.md
 
 # Editor directories and files
 .vscode/*
