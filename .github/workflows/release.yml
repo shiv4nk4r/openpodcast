@@ -221,7 +221,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download macOS artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: macos-aarch64
           path: dist-release
@@ -229,14 +229,14 @@ jobs:
       - name: Download signed Windows artifacts
         id: dl-signed
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: windows-x64-signed
           path: dist-release
 
       - name: Download unsigned Windows artifacts
         if: steps.dl-signed.outcome != 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: windows-x64-unsigned
           path: dist-release
