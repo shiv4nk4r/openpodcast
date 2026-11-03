@@ -189,6 +189,16 @@ fn run_native_file(
     speaker: &str,
     offset_secs: f64,
 ) -> Result<Vec<CaptionCue>, String> {
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (wav_path, speaker, offset_secs);
+        return Err(
+            "Native on-device captions are only available on macOS and Windows".into(),
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
     let json = {
         #[cfg(target_os = "macos")]
         {
@@ -197,11 +207,6 @@ fn run_native_file(
         #[cfg(target_os = "windows")]
         {
             run_windows(wav_path)?
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            let _ = wav_path;
-            return Err("Native on-device captions are only available on macOS and Windows".into());
         }
     };
 
@@ -249,6 +254,7 @@ fn run_native_file(
         c.end_ms += (offset_secs * 1000.0).round() as u64;
     }
     Ok(cues)
+    } // cfg macos/windows
 }
 
 #[cfg(target_os = "macos")]
