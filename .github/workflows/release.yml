@@ -40,7 +40,7 @@ jobs:
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: meta
         shell: bash
         run: |
@@ -60,7 +60,7 @@ jobs:
     runs-on: macos-latest
     name: macOS (Apple Silicon)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
@@ -122,7 +122,7 @@ jobs:
     runs-on: windows-latest
     name: Windows (x64)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
@@ -218,7 +218,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Publish draft release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download macOS artifacts
         uses: actions/download-artifact@v4
