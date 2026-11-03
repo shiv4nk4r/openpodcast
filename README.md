@@ -24,7 +24,34 @@ npm run tauri dev
 npm run tauri build
 ```
 
-Outputs unsigned `.dmg` / Windows installers under `src-tauri/target/release/bundle/`.
+Outputs `.dmg` / Windows installers under `src-tauri/target/release/bundle/`.
+
+### GitHub Releases (macOS + Windows)
+
+Push a version tag (or run the **Release** workflow manually). CI builds both platforms and attaches installers to a **draft** release:
+
+```bash
+# bump version in package.json + src-tauri/tauri.conf.json first
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Then open the draft at `https://github.com/shiv4nk4r/openpodcast/releases`, check the assets, and click **Publish**.
+
+| Asset | Platform |
+| --- | --- |
+| `OpenPodcast_*_aarch64.dmg` | macOS Apple Silicon (CI = unsigned) |
+| `OpenPodcast_*_x64-setup.exe` | Windows x64 (unsigned) |
+
+For a **notarized** Mac DMG (no Gatekeeper warn), build locally:
+
+```bash
+source scripts/sign-env.sh
+npm run tauri build
+bash scripts/sign-notarize-dmg.sh
+```
+
+Upload/replace that DMG on the same GitHub Release. Windows code-signing cert is optional later (SmartScreen softens after reputation).
 
 ## Google Drive
 

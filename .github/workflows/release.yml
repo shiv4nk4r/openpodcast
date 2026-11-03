@@ -1,0 +1,140 @@
+# Build macOS + Windows installers and attach them to a GitHub Release.
+#
+# Trigger:
+#   git tag v0.1.0 && git push origin v0.1.0
+#   — or run “Release” manually from the Actions tab.
+#
+# Notes:
+# - Windows NSIS installer is unsigned (SmartScreen may warn until you buy a cert).
+# - macOS CI build is unsigned so Gatekeeper will warn. For a notarized DMG, build
+#   locally with scripts/sign-notarize-dmg.sh and upload/replace the asset on the
+#   same release (or later wire Apple certs into secrets).
+# - webrtc-audio-processing needs meson + ninja on the runner.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build/publish (e.g. v0.1.0). Leave empty to use package.json version."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+            os_name: macOS (Apple Silicon)
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: --target x86_64-pc-windows-msvc
+            os_name: Windows (x64)
+
+    runs-on: ${{ matrix.platform }}
+    name: ${{ matrix.os_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: ${{ matrix.target }}
+
+      - name: Install AEC build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install meson ninja cmake pkg-config
+
+      - name: Install AEC build tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install meson ninja
+          meson --version
+          ninja --version
+
+      - name: Skip Apple signing identity in CI
+        if: runner.os == 'macOS'
+        run: |
+          # Local builds can keep Developer ID in tauri.conf.json; CI has no keychain cert.
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("src-tauri/tauri.conf.json")
+          conf = json.loads(p.read_text())
+          mac = conf.setdefault("bundle", {}).setdefault("macOS", {})
+          mac.pop("signingIdentity", None)
+          p.write_text(json.dumps(conf, indent=2) + "\n")
+          print("Removed bundle.macOS.signingIdentity for unsigned CI build")
+          PY
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Fetch ffmpeg sidecar
+        env:
+          TAURI_ENV_TARGET_TRIPLE: ${{ matrix.target }}
+          FFMPEG_FORCE_FETCH: "1"
+        run: node scripts/fetch-ffmpeg.mjs
+
+      - name: Resolve release tag
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
+            TAG="${{ inputs.tag }}"
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            VER="$(node -p "require('./package.json').version")"
+            TAG="v${VER}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Using tag: $TAG"
+
+      - name: Build + upload to GitHub Release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ steps.meta.outputs.tag }}
+          releaseName: OpenPodcast ${{ steps.meta.outputs.tag }}
+          releaseBody: |
+            ## Downloads
+            - **Windows**: `OpenPodcast_*_x64-setup.exe` (NSIS)
+            - **macOS Apple Silicon**: `OpenPodcast_*_aarch64.dmg`
+
+            ### macOS Gatekeeper
+            CI macOS builds are **unsigned**. Right-click → Open the first time, or replace this DMG with a notarized build from `scripts/sign-notarize-dmg.sh`.
+
+            ### Windows SmartScreen
+            Unsigned installers may show “Windows protected your PC” → More info → Run anyway.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
