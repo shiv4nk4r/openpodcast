@@ -6,7 +6,7 @@
 
 Local desktop podcast studio (Tauri 2 + React). Riverside-style lobby → recording studio → editor, with per-person local tracks, peer invites (no hosted server), Google Drive auto-upload, and captions.
 
-**License:** [MIT](LICENSE) · **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) · **Code signing:** [CODE_SIGNING.md](CODE_SIGNING.md) · **Security:** [SECURITY.md](SECURITY.md)
+**License:** [MIT](LICENSE) · **Site:** [shiv4nk4r.github.io/openpodcast](https://shiv4nk4r.github.io/openpodcast/) · **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) · **Code signing:** [CODE_SIGNING.md](CODE_SIGNING.md) · **Security:** [SECURITY.md](SECURITY.md)
 
 ## Features
 

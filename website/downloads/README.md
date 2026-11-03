@@ -1,23 +1,13 @@
-# Release downloads
+# Downloads
 
-Prefer hosting installers on **GitHub Releases** (see repo Actions → Release workflow), then point the landing page `href`s at those asset URLs.
+Installer binaries are **not** stored in this folder anymore.
 
-Example:
+They ship from [GitHub Releases](https://github.com/shiv4nk4r/openpodcast/releases):
 
-```text
-https://github.com/shiv4nk4r/openpodcast/releases/download/v0.1.0/OpenPodcast_0.1.0_aarch64.dmg
-https://github.com/shiv4nk4r/openpodcast/releases/download/v0.1.0/OpenPodcast_0.1.0_x64-setup.exe
-```
-
-## Optional: ship from this folder
-
-| File | Platform |
+| Platform | URL pattern |
 | --- | --- |
-| `OpenPodcast_0.1.0_aarch64.dmg` | macOS Apple Silicon |
-| `OpenPodcast_0.1.0_x64-setup.exe` | Windows x64 |
+| macOS Apple Silicon | `…/releases/download/vX.Y.Z/OpenPodcast_X.Y.Z_aarch64.dmg` |
+| Windows NSIS | `…/releases/download/vX.Y.Z/OpenPodcast_X.Y.Z_x64-setup.exe` |
+| Windows MSI | `…/releases/download/vX.Y.Z/OpenPodcast_X.Y.Z_x64_en-US.msi` |
 
-1. Publish (or download) the GitHub Release assets.
-2. Copy into this folder **or** update `index.html` to the GitHub download URLs.
-3. Deploy `website/`.
-
-Large binaries: don’t commit DMGs to git — use Releases or object storage.
+Update the `href`s in `website/index.html` when you cut a new version (or point at `/releases/latest` for a landing page that always tracks the newest tag).
