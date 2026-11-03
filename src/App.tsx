@@ -1,7 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import Dashboard from "./pages/Dashboard";
-import CreateStudio from "./pages/CreateStudio";
 import Lobby from "./pages/Lobby";
 import Recording from "./pages/Recording";
 import Editor from "./pages/Editor";
@@ -25,7 +24,8 @@ export default function App() {
               </ErrorBoundary>
             }
           />
-          <Route path="/create" element={<CreateStudio />} />
+          {/* Old form-based create flow removed — Lobby is the host entry. */}
+          <Route path="/create" element={<Navigate to="/" replace />} />
           <Route path="/editor/:id" element={<Editor />} />
           <Route path="/playback/:id" element={<Playback />} />
           <Route path="/settings" element={<Settings />} />
