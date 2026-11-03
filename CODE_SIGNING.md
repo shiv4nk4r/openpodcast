@@ -14,6 +14,8 @@ qualifying open-source projects.
 - **How:** GitHub Actions uploads unsigned artifacts, then
   [`signpath/github-action-submit-signing-request`](https://github.com/signpath/github-action-submit-signing-request)
   submits them to SignPath for signing on GitHub-hosted runners only
+- **Toggle:** repo variable `SIGNPATH_ENABLED=true` plus `SIGNPATH_API_TOKEN`
+  and `SIGNPATH_ORGANIZATION_ID` (see [`signing/README.md`](signing/README.md))
 - **Source of truth:** Only binaries produced from this public repository’s
   automated workflows are submitted for signing
 

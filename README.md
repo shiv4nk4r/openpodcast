@@ -1,8 +1,12 @@
 # OpenPodcast
 
+[![CI](https://github.com/shiv4nk4r/openpodcast/actions/workflows/ci.yml/badge.svg)](https://github.com/shiv4nk4r/openpodcast/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/shiv4nk4r/openpodcast)](https://github.com/shiv4nk4r/openpodcast/releases)
+
 Local desktop podcast studio (Tauri 2 + React). Riverside-style lobby → recording studio → editor, with per-person local tracks, peer invites (no hosted server), Google Drive auto-upload, and captions.
 
-**License:** [MIT](LICENSE) · **Code signing:** [CODE_SIGNING.md](CODE_SIGNING.md)
+**License:** [MIT](LICENSE) · **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) · **Code signing:** [CODE_SIGNING.md](CODE_SIGNING.md) · **Security:** [SECURITY.md](SECURITY.md)
 
 ## Features
 
@@ -47,13 +51,14 @@ Then open the draft at `https://github.com/shiv4nk4r/openpodcast/releases`, chec
 
 ### Windows signing (free via SignPath)
 
-1. Make this GitHub repo **public**
-2. Publish one release (unsigned is OK)
-3. Apply at [SignPath Open Source](https://about.signpath.io/product/open-source)
-4. Add secrets/vars listed in [`signing/README.md`](signing/README.md)
-5. Paste [`.signpath/artifact-configuration.xml`](.signpath/artifact-configuration.xml) into the SignPath project
+This repo is **public MIT**, which qualifies for [SignPath Open Source](https://about.signpath.io/product/open-source) signing:
 
-Signed Windows builds show publisher **SignPath Foundation**.
+1. Apply at SignPath and install the GitHub App on this repo
+2. Paste [`.signpath/artifact-configuration.xml`](.signpath/artifact-configuration.xml) into the SignPath project
+3. Add secrets/vars listed in [`signing/README.md`](signing/README.md) — including `SIGNPATH_ENABLED=true`
+4. Cut the next `v*` tag; CI attaches **macOS + Windows**, with Windows signed when SignPath is connected
+
+Signed Windows builds show publisher **SignPath Foundation**. Until then, releases still ship both platforms (Windows unsigned).
 
 ### macOS notarization (local)
 

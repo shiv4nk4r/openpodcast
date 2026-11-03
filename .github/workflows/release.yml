@@ -5,7 +5,8 @@
 #   — or run “Release” manually from the Actions tab.
 #
 # Windows signing (optional until SignPath is approved):
-#   Repo secrets/vars:
+#   Repo vars/secrets:
+#     SIGNPATH_ENABLED=true       (variable — enables the SignPath job)
 #     SIGNPATH_API_TOKEN          (secret)
 #     SIGNPATH_ORGANIZATION_ID    (variable)
 #     SIGNPATH_PROJECT_SLUG       (variable, default: openpodcast)
@@ -13,6 +14,7 @@
 #     SIGNPATH_ARTIFACT_CONFIGURATION_SLUG (variable, default: windows-installers)
 #
 # See CODE_SIGNING.md and .signpath/artifact-configuration.xml.
+# Publish always attaches macOS + Windows (signed Windows when SignPath runs).
 
 name: Release
 
@@ -136,6 +138,14 @@ jobs:
           workspaces: src-tauri -> target
           shared-key: x86_64-pc-windows-msvc
 
+      - name: Install AEC build tools
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install meson ninja
+          meson --version
+          ninja --version
+
       - run: npm ci
 
       - name: Fetch ffmpeg sidecar
@@ -168,10 +178,20 @@ jobs:
 
   sign-windows:
     needs: build-windows
-    if: ${{ secrets.SIGNPATH_API_TOKEN != '' && vars.SIGNPATH_ORGANIZATION_ID != '' }}
+    # Prefer an explicit repo variable so the job can be toggled without
+    # putting secrets in `if:` (and so unsigned releases still publish).
+    if: ${{ vars.SIGNPATH_ENABLED == 'true' }}
     runs-on: windows-latest
     name: Sign Windows (SignPath)
     steps:
+      - name: Require SignPath credentials
+        shell: bash
+        run: |
+          if [[ -z "${{ secrets.SIGNPATH_API_TOKEN }}" || -z "${{ vars.SIGNPATH_ORGANIZATION_ID }}" ]]; then
+            echo "SIGNPATH_ENABLED=true but SIGNPATH_API_TOKEN / SIGNPATH_ORGANIZATION_ID are missing."
+            exit 1
+          fi
+
       - name: Submit signing request
         id: sign
         uses: signpath/github-action-submit-signing-request@v3

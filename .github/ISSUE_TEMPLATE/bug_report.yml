@@ -1,0 +1,56 @@
+name: Bug report
+description: Something is broken in OpenPodcast
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Security issues → see [SECURITY.md](../SECURITY.md) (private reporting).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Clear description of the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      multiple: true
+      options:
+        - macOS Apple Silicon
+        - macOS Intel
+        - Windows 10/11
+        - Other / unknown
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: e.g. v0.1.0 from GitHub Releases, or `git` commit.
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Paste relevant terminal or UI errors (redact secrets).
+    validations:
+      required: false

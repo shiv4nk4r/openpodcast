@@ -58,6 +58,7 @@ git push origin v0.1.0
 
 | Name | Type | Example |
 | --- | --- | --- |
+| `SIGNPATH_ENABLED` | variable | `true` (turns on the SignPath job) |
 | `SIGNPATH_API_TOKEN` | **secret** | (from SignPath) |
 | `SIGNPATH_ORGANIZATION_ID` | variable | UUID from SignPath org |
 | `SIGNPATH_PROJECT_SLUG` | variable | `openpodcast` |
@@ -66,7 +67,7 @@ git push origin v0.1.0
 
 Policy + workflow notes: [`CODE_SIGNING.md`](../CODE_SIGNING.md).
 
-After that, the **Release** workflow signs Windows MSI/NSIS automatically when those values are present.
+After that, set `SIGNPATH_ENABLED=true`. The **Release** workflow signs Windows MSI/NSIS when credentials are present; otherwise it still publishes **unsigned** Windows + macOS assets.
 
 ## Windows — paid Authenticode (your name on the cert)
 
