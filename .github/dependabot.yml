@@ -18,6 +18,8 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+      # Transitive (gtk/tauri stack); 0.20+ is not resolvable without a major GUI bump.
+      - dependency-name: "glib"
 
   - package-ecosystem: github-actions
     directory: "/"

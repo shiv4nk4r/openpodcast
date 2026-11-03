@@ -35,6 +35,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
         with:
@@ -54,6 +58,13 @@ jobs:
             ninja-build \
             cmake \
             pkg-config
+      # Tauri externalBin requires the sidecar present even for `cargo check`.
+      - run: npm ci
+      - name: Fetch ffmpeg sidecar
+        env:
+          TAURI_ENV_TARGET_TRIPLE: x86_64-unknown-linux-gnu
+          FFMPEG_FORCE_FETCH: "1"
+        run: node scripts/fetch-ffmpeg.mjs
       - name: cargo check
         working-directory: src-tauri
         run: cargo check --locked
