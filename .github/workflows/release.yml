@@ -245,7 +245,7 @@ jobs:
         run: ls -la dist-release
 
       - name: Create / update draft GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.meta.outputs.tag }}
           name: OpenPodcast ${{ needs.meta.outputs.tag }}
