@@ -2,6 +2,8 @@
 
 Local desktop podcast studio (Tauri 2 + React). Riverside-style lobby → recording studio → editor, with per-person local tracks, peer invites (no hosted server), Google Drive auto-upload, and captions.
 
+**License:** [MIT](LICENSE) · **Code signing:** [CODE_SIGNING.md](CODE_SIGNING.md)
+
 ## Features
 
 - **Host + guests**: create a studio, copy an invite ticket, guests paste it in the same app
@@ -40,10 +42,20 @@ Then open the draft at `https://github.com/shiv4nk4r/openpodcast/releases`, chec
 
 | Asset | Platform |
 | --- | --- |
-| `OpenPodcast_*_aarch64.dmg` | macOS Apple Silicon (CI = unsigned) |
-| `OpenPodcast_*_x64-setup.exe` | Windows x64 (unsigned) |
+| `OpenPodcast_*_aarch64.dmg` | macOS Apple Silicon (CI = unsigned unless you replace with notarized DMG) |
+| `OpenPodcast_*_x64-setup.exe` / `*_en-US.msi` | Windows x64 (SignPath-signed when configured) |
 
-For a **notarized** Mac DMG (no Gatekeeper warn), build locally:
+### Windows signing (free via SignPath)
+
+1. Make this GitHub repo **public**
+2. Publish one release (unsigned is OK)
+3. Apply at [SignPath Open Source](https://about.signpath.io/product/open-source)
+4. Add secrets/vars listed in [`signing/README.md`](signing/README.md)
+5. Paste [`.signpath/artifact-configuration.xml`](.signpath/artifact-configuration.xml) into the SignPath project
+
+Signed Windows builds show publisher **SignPath Foundation**.
+
+### macOS notarization (local)
 
 ```bash
 source scripts/sign-env.sh
@@ -51,7 +63,7 @@ npm run tauri build
 bash scripts/sign-notarize-dmg.sh
 ```
 
-Upload/replace that DMG on the same GitHub Release. Windows code-signing cert is optional later (SmartScreen softens after reputation).
+Upload/replace that DMG on the same GitHub Release.
 
 ## Google Drive
 
@@ -64,4 +76,4 @@ Without a client ID, recordings still save locally (and to any folder you choose
 
 ## License
 
-MIT
+[MIT](LICENSE)

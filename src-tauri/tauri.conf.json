@@ -38,6 +38,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "Shivankar Sharma",
     "externalBin": [
       "binaries/ffmpeg"
     ],
@@ -54,6 +55,11 @@
       "infoPlist": "Info.plist",
       "entitlements": "Entitlements.plist",
       "signingIdentity": "Developer ID Application: Shivankar Sharma (NH6XX7B9AW)"
+    },
+    "windows": {
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com",
+      "tsp": true
     }
   }
 }

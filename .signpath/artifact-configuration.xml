@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Paste this into SignPath → Project → Artifact configurations
+  (slug suggestion: windows-installers).
+
+  GitHub Actions uploads a ZIP of MSI + NSIS setup; SignPath deep-signs the
+  app EXE inside the MSI, then signs the MSI and the NSIS setup EXE.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <msi-file path="OpenPodcast_*_x64_en-US.msi" max-matches="1">
+      <pe-file path="openpodcast.exe">
+        <authenticode-sign />
+      </pe-file>
+      <pe-file path="ffmpeg.exe">
+        <authenticode-sign />
+      </pe-file>
+      <authenticode-sign />
+    </msi-file>
+    <pe-file path="OpenPodcast_*_x64-setup.exe" max-matches="1">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

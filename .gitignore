@@ -18,12 +18,15 @@ src-tauri/binaries/ffmpeg.exe
 src-tauri/binaries/ffmpeg-*
 .cargo-target
 scripts/sign-env.sh
+scripts/sign-env.ps1
 # Signing secrets — keep .cer backups; never commit private keys / API keys
 signing/*.key
 signing/*.p12
+signing/*.pfx
 signing/*.pem
 signing/*.p8
 signing/AuthKey_*.p8
+signing/windows-codesign.*
 !signing/*.cer
 !signing/*.certSigningRequest
 !signing/README.md

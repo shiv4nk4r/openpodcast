@@ -44,7 +44,10 @@ tracing = "0.1"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 iroh = "1.4.1"
 iroh-tickets = "1.0"
-# Native AEC3 for live preview (requires meson + ninja on the build machine).
+
+# Native AEC3 for live preview (requires meson + ninja; Unix `cp` in the build script).
+# Windows uses a passthrough stub in `aec.rs` instead.
+[target.'cfg(not(windows))'.dependencies]
 webrtc-audio-processing = { version = "2.1", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]

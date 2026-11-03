@@ -1,18 +1,24 @@
-//! Native WebRTC AEC3 for the live P2P preview path.
+//! Native WebRTC AEC3 for the live P2P preview path (macOS / Linux).
 //!
 //! Far-end (what peers send us, which we play) is fed as the AEC *render* reference.
 //! Near-end mic PCM is cleaned with `process_capture` before we send it out.
 //!
 //! Runs at 16 kHz to match the preview wire format. Frame size is 10 ms (160 samples).
 //! Requires `meson` + `ninja` on the build machine (bundled webrtc-audio-processing).
+//!
+//! On Windows the bundled WebRTC build needs Unix tools (`cp`, meson, ninja), so we
+//! ship a passthrough stub — browser echoCancellation still covers local preview.
 
 use base64::Engine;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
+
+#[cfg(not(windows))]
 use webrtc_audio_processing::config::{
     EchoCanceller, HighPassFilter, NoiseSuppression, NoiseSuppressionLevel,
 };
+#[cfg(not(windows))]
 use webrtc_audio_processing::{Config, Processor};
 
 const SAMPLE_RATE: u32 = 16_000;
@@ -21,12 +27,17 @@ const DEFAULT_STREAM_DELAY_MS: u16 = 140;
 
 pub struct AecEngine {
     /// Single lock covers processor + pending buffers (render+capture must stay ordered).
+    #[cfg(not(windows))]
     inner: Mutex<AecInner>,
+    #[cfg(windows)]
+    _inner: Mutex<()>,
     enabled: AtomicBool,
     stream_delay_ms: AtomicU16,
+    #[cfg(not(windows))]
     frame_len: usize,
 }
 
+#[cfg(not(windows))]
 struct AecInner {
     processor: Processor,
     render_pending: Vec<f32>,
@@ -35,32 +46,54 @@ struct AecInner {
 
 impl AecEngine {
     pub fn new() -> Result<Arc<Self>, String> {
-        let processor = Processor::new(SAMPLE_RATE).map_err(|e| e.to_string())?;
-        let frame_len = processor.num_samples_per_frame();
-        let engine = Arc::new(Self {
-            inner: Mutex::new(AecInner {
-                processor,
-                render_pending: Vec::with_capacity(frame_len * 4),
-                capture_pending: Vec::with_capacity(frame_len * 4),
-            }),
-            enabled: AtomicBool::new(true),
-            stream_delay_ms: AtomicU16::new(DEFAULT_STREAM_DELAY_MS),
-            frame_len,
-        });
-        engine.apply_config(true, DEFAULT_STREAM_DELAY_MS);
-        Ok(engine)
+        #[cfg(windows)]
+        {
+            let _ = SAMPLE_RATE;
+            return Ok(Arc::new(Self {
+                _inner: Mutex::new(()),
+                enabled: AtomicBool::new(false),
+                stream_delay_ms: AtomicU16::new(DEFAULT_STREAM_DELAY_MS),
+            }));
+        }
+        #[cfg(not(windows))]
+        {
+            let processor = Processor::new(SAMPLE_RATE).map_err(|e| e.to_string())?;
+            let frame_len = processor.num_samples_per_frame();
+            let engine = Arc::new(Self {
+                inner: Mutex::new(AecInner {
+                    processor,
+                    render_pending: Vec::with_capacity(frame_len * 4),
+                    capture_pending: Vec::with_capacity(frame_len * 4),
+                }),
+                enabled: AtomicBool::new(true),
+                stream_delay_ms: AtomicU16::new(DEFAULT_STREAM_DELAY_MS),
+                frame_len,
+            });
+            engine.apply_config(true, DEFAULT_STREAM_DELAY_MS);
+            Ok(engine)
+        }
     }
 
     pub fn set_enabled(&self, enabled: bool) {
-        let was = self.enabled.swap(enabled, Ordering::Relaxed);
-        if was != enabled {
-            self.apply_config(enabled, self.stream_delay_ms.load(Ordering::Relaxed));
-            let mut inner = self.inner.lock();
-            if enabled {
-                inner.processor.reinitialize();
+        #[cfg(windows)]
+        {
+            // Native AEC unavailable — keep disabled so callers don't assume processing.
+            let _ = enabled;
+            self.enabled.store(false, Ordering::Relaxed);
+            return;
+        }
+        #[cfg(not(windows))]
+        {
+            let was = self.enabled.swap(enabled, Ordering::Relaxed);
+            if was != enabled {
+                self.apply_config(enabled, self.stream_delay_ms.load(Ordering::Relaxed));
+                let mut inner = self.inner.lock();
+                if enabled {
+                    inner.processor.reinitialize();
+                }
+                inner.render_pending.clear();
+                inner.capture_pending.clear();
             }
-            inner.render_pending.clear();
-            inner.capture_pending.clear();
         }
     }
 
@@ -70,11 +103,13 @@ impl AecEngine {
 
     pub fn set_stream_delay_ms(&self, delay_ms: u16) {
         self.stream_delay_ms.store(delay_ms, Ordering::Relaxed);
+        #[cfg(not(windows))]
         if self.enabled() {
             self.apply_config(true, delay_ms);
         }
     }
 
+    #[cfg(not(windows))]
     fn apply_config(&self, enabled: bool, delay_ms: u16) {
         self.inner.lock().processor.set_config(Config {
             echo_canceller: enabled.then_some(EchoCanceller::Full {
@@ -93,62 +128,77 @@ impl AecEngine {
 
     /// Far-end reference: PCM we are about to play (or just received for playback).
     pub fn feed_render_pcm16(&self, pcm: &[i16]) {
-        if !self.enabled() || pcm.is_empty() {
+        #[cfg(windows)]
+        {
+            let _ = pcm;
             return;
         }
-        let mut inner = self.inner.lock();
-        inner
-            .render_pending
-            .extend(pcm.iter().map(|s| *s as f32 / 32768.0));
-        while inner.render_pending.len() >= self.frame_len {
-            let frame: Vec<f32> = inner.render_pending.drain(..self.frame_len).collect();
-            let _ = inner.processor.analyze_render_frame([&frame[..]]);
+        #[cfg(not(windows))]
+        {
+            if !self.enabled() || pcm.is_empty() {
+                return;
+            }
+            let mut inner = self.inner.lock();
+            inner
+                .render_pending
+                .extend(pcm.iter().map(|s| *s as f32 / 32768.0));
+            while inner.render_pending.len() >= self.frame_len {
+                let frame: Vec<f32> = inner.render_pending.drain(..self.frame_len).collect();
+                let _ = inner.processor.analyze_render_frame([&frame[..]]);
+            }
         }
     }
 
     /// Near-end capture: returns echo-cancelled PCM (same length as input).
     pub fn process_capture_pcm16(&self, pcm: &[i16]) -> Vec<i16> {
-        if !self.enabled() || pcm.is_empty() {
+        #[cfg(windows)]
+        {
             return pcm.to_vec();
         }
-        let mut inner = self.inner.lock();
-        inner
-            .capture_pending
-            .extend(pcm.iter().map(|s| *s as f32 / 32768.0));
-
-        let mut out_f = Vec::with_capacity(pcm.len());
-        while inner.capture_pending.len() >= self.frame_len {
-            let mut frame: Vec<f32> = inner.capture_pending.drain(..self.frame_len).collect();
-            if inner
-                .processor
-                .process_capture_frame(&mut [&mut frame[..]])
-                .is_ok()
-            {
-                out_f.extend_from_slice(&frame);
-            } else {
-                out_f.extend_from_slice(&frame);
+        #[cfg(not(windows))]
+        {
+            if !self.enabled() || pcm.is_empty() {
+                return pcm.to_vec();
             }
-        }
+            let mut inner = self.inner.lock();
+            inner
+                .capture_pending
+                .extend(pcm.iter().map(|s| *s as f32 / 32768.0));
 
-        if out_f.is_empty() {
-            return pcm.to_vec();
-        }
+            let mut out_f = Vec::with_capacity(pcm.len());
+            while inner.capture_pending.len() >= self.frame_len {
+                let mut frame: Vec<f32> = inner.capture_pending.drain(..self.frame_len).collect();
+                if inner
+                    .processor
+                    .process_capture_frame(&mut [&mut frame[..]])
+                    .is_ok()
+                {
+                    out_f.extend_from_slice(&frame);
+                } else {
+                    out_f.extend_from_slice(&frame);
+                }
+            }
 
-        let mut out: Vec<i16> = out_f
-            .into_iter()
-            .map(|s| {
-                (s.clamp(-1.0, 1.0) * 32767.0)
-                    .round()
-                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16
-            })
-            .collect();
+            if out_f.is_empty() {
+                return pcm.to_vec();
+            }
 
-        if out.len() < pcm.len() {
-            out.extend_from_slice(&pcm[out.len()..]);
-        } else if out.len() > pcm.len() {
-            out.truncate(pcm.len());
+            let mut out: Vec<i16> = out_f
+                .into_iter()
+                .map(|s| {
+                    (s.clamp(-1.0, 1.0) * 32767.0)
+                        .round()
+                        .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                })
+                .collect();
+
+            if out.len() < pcm.len() {
+                out.extend_from_slice(&pcm[out.len()..]);
+            } else if out.len() > pcm.len() {
+                out.truncate(pcm.len());
+            }
+            out
         }
-        out
     }
 
     pub fn feed_render_b64(&self, pcm_b64: &str) {
