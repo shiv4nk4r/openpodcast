@@ -111,7 +111,7 @@ jobs:
             -path '*/bundle/*' -print -exec cp {} dist-release/ \;
           ls -la dist-release
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos-aarch64
           path: dist-release/*
@@ -166,7 +166,7 @@ jobs:
             ForEach-Object { Copy-Item $_.FullName dist-release\ -Force; $_.FullName }
           Get-ChildItem dist-release | Format-Table Name, Length
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         id: upload-unsigned-windows
         with:
           name: windows-x64-unsigned
@@ -206,7 +206,7 @@ jobs:
           wait-for-completion-timeout-in-seconds: 1800
           output-artifact-directory: signed-windows
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-x64-signed
           path: signed-windows/*
