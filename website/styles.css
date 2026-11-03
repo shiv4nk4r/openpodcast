@@ -522,8 +522,27 @@ code {
   max-width: 40rem;
 }
 
-.fineprint.missing a {
-  color: var(--accent);
+.fineprint a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--ink) 28%, transparent);
+  text-underline-offset: 0.12em;
+}
+
+.fineprint a:hover {
+  text-decoration-color: var(--ink);
+}
+
+.community-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+.community .section-lede a {
+  color: var(--ink);
+  font-weight: 600;
 }
 
 .foot {
@@ -535,6 +554,14 @@ code {
   border-top: 1px solid var(--hairline);
   color: var(--ink-muted);
   font-size: 0.88rem;
+}
+
+.foot a {
+  color: var(--ink-muted);
+}
+
+.foot a:hover {
+  color: var(--ink);
 }
 
 .foot span:first-child {
