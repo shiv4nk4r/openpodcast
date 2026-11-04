@@ -119,6 +119,8 @@ jobs:
 
   build-windows:
     needs: meta
+    # Skip until Windows code-signing / licensing is ready (SignPath, etc.).
+    if: ${{ vars.RELEASE_WINDOWS == 'true' }}
     runs-on: windows-latest
     name: Windows (x64)
     steps:
@@ -214,7 +216,11 @@ jobs:
 
   publish:
     needs: [meta, build-macos, build-windows, sign-windows]
-    if: always() && needs.meta.result == 'success' && needs.build-macos.result == 'success' && needs.build-windows.result == 'success'
+    if: |
+      always()
+      && needs.meta.result == 'success'
+      && needs.build-macos.result == 'success'
+      && (needs.build-windows.result == 'success' || needs.build-windows.result == 'skipped')
     runs-on: ubuntu-latest
     name: Publish draft release
     steps:
@@ -228,6 +234,7 @@ jobs:
 
       - name: Download signed Windows artifacts
         id: dl-signed
+        if: needs.build-windows.result == 'success'
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
@@ -235,7 +242,7 @@ jobs:
           path: dist-release
 
       - name: Download unsigned Windows artifacts
-        if: steps.dl-signed.outcome != 'success'
+        if: needs.build-windows.result == 'success' && steps.dl-signed.outcome != 'success'
         uses: actions/download-artifact@v4
         with:
           name: windows-x64-unsigned
@@ -255,16 +262,13 @@ jobs:
           files: dist-release/*
           body: |
             ## Downloads
-            - **Windows**: `OpenPodcast_*_x64-setup.exe` (NSIS) and/or `OpenPodcast_*_x64_en-US.msi`
-            - **macOS Apple Silicon**: `OpenPodcast_*_aarch64.dmg`
+            - **macOS Apple Silicon**: `OpenPodcast_*_aarch64.dmg` (notarized builds are uploaded from a local Developer ID release when available)
 
-            ### Windows signing
-            When SignPath is connected, Windows installers are Authenticode-signed by
-            **SignPath Foundation** (see CODE_SIGNING.md in the repo).
-            Until then, SmartScreen may warn → More info → Run anyway.
+            Windows installers are not published in this release (signing / licensing pending).
+            Set repo variable `RELEASE_WINDOWS=true` to include them again.
 
             ### macOS Gatekeeper
-            CI macOS builds are **unsigned**. Right-click → Open the first time, or replace
-            this DMG with a notarized build from `scripts/sign-notarize-dmg.sh`.
+            Prefer a notarized DMG. CI-built macOS artifacts may be unsigned —
+            Right-click → Open the first time, or replace with `scripts/sign-notarize-dmg.sh`.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

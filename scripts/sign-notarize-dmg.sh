@@ -11,7 +11,14 @@ APP="$ROOT/src-tauri/target/release/bundle/macos/OpenPodcast.app"
 ENT="$ROOT/src-tauri/Entitlements.plist"
 ID="${APPLE_SIGNING_IDENTITY:-Developer ID Application: Shivankar Sharma (NH6XX7B9AW)}"
 DMG_DIR="$ROOT/src-tauri/target/release/bundle/dmg"
-OUT_DMG="$DMG_DIR/OpenPodcast_0.1.0_aarch64.dmg"
+VERSION="$(node -p "require('$ROOT/package.json').version" 2>/dev/null || echo 0.1.1)"
+ARCH="$(uname -m)"
+case "$ARCH" in
+  arm64) ARCH_LABEL=aarch64 ;;
+  x86_64) ARCH_LABEL=x86_64 ;;
+  *) ARCH_LABEL="$ARCH" ;;
+esac
+OUT_DMG="$DMG_DIR/OpenPodcast_${VERSION}_${ARCH_LABEL}.dmg"
 MAX_TRIES="${CODESIGN_RETRIES:-12}"
 
 if [[ ! -d "$APP" ]]; then
