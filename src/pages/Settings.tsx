@@ -13,6 +13,7 @@ import {
 } from "@tabler/icons-react";
 import { api } from "../api";
 import { Select } from "../components/Select";
+import { VoiceProfileSelect } from "../components/VoiceProfileSelect";
 import { pickPreferred, useDeviceList } from "../hooks/useDeviceList";
 import { useApp } from "../state";
 import { useTheme, type ThemeId } from "../theme";
@@ -393,6 +394,14 @@ export default function Settings() {
               <span className="rs-settings-switch" aria-hidden />
             </button>
           </div>
+        </section>
+
+        <section className="rs-settings-card">
+          <div className="rs-settings-card-head">
+            <h2>Voice profile</h2>
+            <p>Applied to recording and what others hear.</p>
+          </div>
+          <VoiceProfileSelect />
         </section>
 
         <section className="rs-settings-card">

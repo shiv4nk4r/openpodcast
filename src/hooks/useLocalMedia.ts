@@ -1,4 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  applyBandToFilter,
+  cloneProfile,
+  resolveEqProfile,
+  type EqProfile,
+} from "../lib/eq";
 import { resolutionToSize } from "../lib/studioQuality";
 
 export type RecordSink = {
@@ -15,9 +21,14 @@ export function useLocalMedia(opts: {
   skipAutoStart?: boolean;
   resolution?: string;
   frameRate?: number;
+  /** Initial EQ profile (resolved from settings). */
+  eqProfile?: EqProfile;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  /** Combined processed audio + camera video — used for record / P2P. */
   const streamRef = useRef<MediaStream | null>(null);
+  /** Raw getUserMedia — stop tracks here on teardown / device change. */
+  const rawStreamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const streamingRef = useRef(false);
@@ -31,43 +42,81 @@ export function useLocalMedia(opts: {
   const [monitoring, setMonitoringState] = useState(false);
   const rafRef = useRef<number>(0);
 
-  const meterCtxRef = useRef<AudioContext | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
   const monitorGainRef = useRef<GainNode | null>(null);
   const monitoringDesiredRef = useRef(false);
   const smoothedRef = useRef(0);
+  const eqFiltersRef = useRef<BiquadFilterNode[]>([]);
+  const eqProfileRef = useRef<EqProfile>(
+    opts.eqProfile
+      ? cloneProfile(opts.eqProfile)
+      : resolveEqProfile("flat", []),
+  );
+  const processedDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
 
-  const stopMeter = () => {
+  const stopAudioGraph = () => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = 0;
     monitorGainRef.current = null;
-    void meterCtxRef.current?.close().catch(() => undefined);
-    meterCtxRef.current = null;
+    eqFiltersRef.current = [];
+    processedDestRef.current = null;
+    void audioCtxRef.current?.close().catch(() => undefined);
+    audioCtxRef.current = null;
     smoothedRef.current = 0;
     setLevel(0);
     setMonitoringState(false);
   };
 
-  const startMeter = (stream: MediaStream) => {
-    stopMeter();
-    const audioTracks = stream.getAudioTracks();
-    if (!audioTracks.length) return;
+  const wireEqFilters = (
+    ctx: AudioContext,
+    input: AudioNode,
+    output: AudioNode,
+    profile: EqProfile,
+  ) => {
+    const bands = profile.bands.length
+      ? profile.bands
+      : [{ id: "noop", type: "peaking" as const, frequency: 1000, gain: 0, q: 1, enabled: true }];
+    const filters = bands.map(() => ctx.createBiquadFilter());
+    eqFiltersRef.current = filters;
+    let prev: AudioNode = input;
+    for (let i = 0; i < filters.length; i++) {
+      applyBandToFilter(filters[i], bands[i] ?? bands[0], profile.bypass);
+      prev.connect(filters[i]);
+      prev = filters[i];
+    }
+    prev.connect(output);
+    return filters;
+  };
+
+  const startAudioGraph = (raw: MediaStream) => {
+    stopAudioGraph();
+    const audioTracks = raw.getAudioTracks();
+    if (!audioTracks.length) return null;
 
     const ctx = new AudioContext();
-    meterCtxRef.current = ctx;
+    audioCtxRef.current = ctx;
     void ctx.resume();
 
-    const source = ctx.createMediaStreamSource(stream);
+    const source = ctx.createMediaStreamSource(raw);
+    const dest = ctx.createMediaStreamDestination();
+    processedDestRef.current = dest;
+
     const analyser = ctx.createAnalyser();
-    // Larger window + slight smoothing gives a stabler, fuller meter
     analyser.fftSize = 2048;
     analyser.smoothingTimeConstant = 0.8;
-    const gain = ctx.createGain();
-    // Soft start; restore monitor if user was testing when devices changed.
-    gain.gain.value = monitoringDesiredRef.current ? 1 : 0;
-    monitorGainRef.current = gain;
-    source.connect(analyser);
-    source.connect(gain);
-    gain.connect(ctx.destination);
+
+    const monitorGain = ctx.createGain();
+    monitorGain.gain.value = monitoringDesiredRef.current ? 1 : 0;
+    monitorGainRef.current = monitorGain;
+
+    const profile = eqProfileRef.current;
+    // Mic → EQ → destination (record/P2P) + analyser + monitor
+    wireEqFilters(ctx, source, dest, profile);
+    const last =
+      eqFiltersRef.current[eqFiltersRef.current.length - 1] ?? source;
+    last.connect(analyser);
+    last.connect(monitorGain);
+    monitorGain.connect(ctx.destination);
     setMonitoringState(monitoringDesiredRef.current);
 
     const data = new Float32Array(analyser.fftSize);
@@ -84,16 +133,12 @@ export function useLocalMedia(opts: {
         peak = Math.max(peak, Math.abs(s));
       }
       const rms = Math.sqrt(sumSquares / data.length);
-      // Blend RMS + peak, then boost so normal speech fills most of the bar
-      const raw = Math.min(1, rms * 3.2 + peak * 0.55);
-      // Soft knee so quiet speech still moves, loud speech can hit ~100%
-      const boosted = Math.min(1, Math.pow(raw, 0.65) * 1.35);
-      // Attack fast / release slower for a natural VU feel
+      const rawLevel = Math.min(1, rms * 3.2 + peak * 0.55);
+      const boosted = Math.min(1, Math.pow(rawLevel, 0.65) * 1.35);
       const prev = smoothedRef.current;
       const next =
         boosted > prev ? prev * 0.35 + boosted * 0.65 : prev * 0.85 + boosted * 0.15;
       smoothedRef.current = next;
-      // Cap React meter updates ~20fps to reduce render churn while recording
       const now = performance.now();
       if (now - lastUi > 50) {
         lastUi = now;
@@ -102,13 +147,54 @@ export function useLocalMedia(opts: {
       rafRef.current = requestAnimationFrame(tick);
     };
     tick();
+
+    return dest.stream;
   };
+
+  const rebuildProcessedStream = () => {
+    const raw = rawStreamRef.current;
+    if (!raw || !opts.audio) return;
+    const processedAudio = startAudioGraph(raw);
+    if (!processedAudio) return;
+    const combined = new MediaStream([
+      ...processedAudio.getAudioTracks(),
+      ...raw.getVideoTracks(),
+    ]);
+    streamRef.current = combined;
+    if (videoRef.current) {
+      videoRef.current.srcObject = combined;
+    }
+  };
+
+  /** Live-update EQ without tearing down getUserMedia. */
+  const applyEqProfile = useCallback((profile: EqProfile) => {
+    const next = cloneProfile(profile);
+    eqProfileRef.current = next;
+    const filters = eqFiltersRef.current;
+    const bandCount = Math.max(1, next.bands.length);
+
+    if (!audioCtxRef.current || filters.length !== bandCount) {
+      rebuildProcessedStream();
+      return;
+    }
+
+    const bands = next.bands.length
+      ? next.bands
+      : [{ id: "noop", type: "peaking" as const, frequency: 1000, gain: 0, q: 1, enabled: true }];
+    for (let i = 0; i < filters.length; i++) {
+      applyBandToFilter(filters[i], bands[i] ?? bands[0], next.bypass);
+    }
+  }, []);
 
   const start = useCallback(
     async (deviceIds?: { audio?: string; video?: string }) => {
       setError(null);
       try {
-        streamRef.current?.getTracks().forEach((t) => t.stop());
+        rawStreamRef.current?.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+        rawStreamRef.current = null;
+        stopAudioGraph();
+
         const size = resolutionToSize(opts.resolution ?? "1080p");
         const fps = opts.frameRate && opts.frameRate > 0 ? opts.frameRate : 30;
         const audioConstraints = (
@@ -119,10 +205,7 @@ export function useLocalMedia(opts: {
                 ...(preferDevice && deviceIds?.audio
                   ? { deviceId: { ideal: deviceIds.audio } }
                   : {}),
-                // Browser AEC fights native AEC3 on the P2P PCM path — keep it off
-                // in studio. `opts.echoCancellation` remains for Settings preview only.
                 echoCancellation: opts.echoCancellation ?? false,
-                // NS ducks speech; AGC lifts quiet mics into a usable range
                 noiseSuppression: false,
                 autoGainControl: true,
               }
@@ -141,23 +224,21 @@ export function useLocalMedia(opts: {
               }
             : false;
 
-        // Prefer selected devices, then any device, then audio-only if video fails.
-        // WebView2 on Windows is stricter about OverconstrainedError / NotAllowedError.
-        let stream: MediaStream;
+        let raw: MediaStream;
         try {
-          stream = await navigator.mediaDevices.getUserMedia({
+          raw = await navigator.mediaDevices.getUserMedia({
             audio: audioConstraints(true),
             video: videoConstraints(true),
           });
         } catch (first) {
           try {
-            stream = await navigator.mediaDevices.getUserMedia({
+            raw = await navigator.mediaDevices.getUserMedia({
               audio: audioConstraints(false),
               video: videoConstraints(false),
             });
           } catch (second) {
             if (opts.audio && opts.video) {
-              stream = await navigator.mediaDevices.getUserMedia({
+              raw = await navigator.mediaDevices.getUserMedia({
                 audio: audioConstraints(false),
                 video: false,
               });
@@ -166,14 +247,26 @@ export function useLocalMedia(opts: {
             }
           }
         }
-        streamRef.current = stream;
+        rawStreamRef.current = raw;
+
+        let combined: MediaStream = raw;
+        if (opts.audio) {
+          const processedAudio = startAudioGraph(raw);
+          if (processedAudio) {
+            combined = new MediaStream([
+              ...processedAudio.getAudioTracks(),
+              ...raw.getVideoTracks(),
+            ]);
+          }
+        }
+        streamRef.current = combined;
+
         if (videoRef.current) {
           videoRef.current.controls = false;
           videoRef.current.disablePictureInPicture = true;
-          videoRef.current.srcObject = stream;
+          videoRef.current.srcObject = combined;
           await videoRef.current.play().catch(() => undefined);
         }
-        if (opts.audio) startMeter(stream);
         const list = await navigator.mediaDevices.enumerateDevices();
         setDevices(list);
         setReady(true);
@@ -190,10 +283,23 @@ export function useLocalMedia(opts: {
       void start();
     }
     return () => {
-      stopMeter();
-      streamRef.current?.getTracks().forEach((t) => t.stop());
+      stopAudioGraph();
+      rawStreamRef.current?.getTracks().forEach((t) => t.stop());
+      rawStreamRef.current = null;
+      streamRef.current = null;
     };
   }, [start, opts.skipAutoStart]);
+
+  // Seed EQ from settings once when the active profile id changes (not on every object identity).
+  const eqSeedId = opts.eqProfile?.id;
+  const eqSeedBypass = opts.eqProfile?.bypass;
+  useEffect(() => {
+    if (opts.eqProfile) {
+      applyEqProfile(opts.eqProfile);
+    }
+    // intentionally seed from id/bypass only — panel pushes live edits via applyEqProfile
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eqSeedId, eqSeedBypass]);
 
   const setVideoEl = useCallback((el: HTMLVideoElement | null) => {
     const prev = videoRef.current;
@@ -210,7 +316,6 @@ export function useLocalMedia(opts: {
       el.setAttribute("disablePictureInPicture", "");
       el.setAttribute("playsinline", "true");
       el.setAttribute("webkit-playsinline", "true");
-      // Defeat WKWebView media overlay pausing the stream
       el.onpause = () => {
         if (el.paused && el.srcObject) void el.play().catch(() => undefined);
       };
@@ -222,15 +327,22 @@ export function useLocalMedia(opts: {
   }, []);
 
   const toggleTrack = (kind: "audio" | "video", enabled: boolean) => {
-    streamRef.current?.getTracks().forEach((t) => {
+    // Mute at the raw mic so EQ / dest go silent; video on the shared track refs.
+    const target = kind === "audio" ? rawStreamRef.current : streamRef.current;
+    target?.getTracks().forEach((t) => {
       if (t.kind === kind) t.enabled = enabled;
     });
+    if (kind === "video") {
+      rawStreamRef.current?.getVideoTracks().forEach((t) => {
+        t.enabled = enabled;
+      });
+    }
   };
 
-  /** Play the live mic into local speakers so the user can hear pickup quality. */
+  /** Play the live (EQ'd) mic into local speakers for a pre-join listen test. */
   const setMonitoring = useCallback(async (on: boolean) => {
     monitoringDesiredRef.current = on;
-    const ctx = meterCtxRef.current;
+    const ctx = audioCtxRef.current;
     const gain = monitorGainRef.current;
     if (!ctx || !gain) {
       setMonitoringState(false);
@@ -262,7 +374,6 @@ export function useLocalMedia(opts: {
     writeErrorRef.current = null;
     writeQueueRef.current = Promise.resolve();
     streamingRef.current = !!sink?.onChunk;
-    // Prefer MP4 for WKWebView/macOS playback in the editor; WebM as fallback.
     const mime = MediaRecorder.isTypeSupported("video/mp4;codecs=avc1,mp4a.40.2")
       ? "video/mp4;codecs=avc1,mp4a.40.2"
       : MediaRecorder.isTypeSupported("video/mp4")
@@ -284,7 +395,6 @@ export function useLocalMedia(opts: {
         chunksRef.current.push(e.data);
       }
     };
-    // 2s slices: fewer IPC writes, still bounded RAM if a write stalls briefly
     rec.start(sink?.timesliceMs ?? 2000);
     recorderRef.current = rec;
   };
@@ -301,7 +411,6 @@ export function useLocalMedia(opts: {
     const streamed = streamingRef.current;
     const mimeType = rec.mimeType || "video/webm";
 
-    // Already stopped (common if RecordStop raced) — don't wait on onstop forever.
     if (rec.state !== "inactive") {
       await new Promise<void>((resolve) => {
         let settled = false;
@@ -321,13 +430,11 @@ export function useLocalMedia(opts: {
         } catch {
           finish();
         }
-        // WKWebView occasionally never fires `stop` — don't block the save modal.
         window.setTimeout(finish, 8_000);
       });
     }
     recorderRef.current = null;
 
-    // Drain in-flight chunk writes, but never hang the stay-in-studio modal.
     await Promise.race([
       writeQueueRef.current,
       new Promise<void>((resolve) => {
@@ -372,6 +479,7 @@ export function useLocalMedia(opts: {
     ready,
     monitoring,
     setMonitoring,
+    applyEqProfile,
     start,
     toggleTrack,
     startRecording,

@@ -62,6 +62,26 @@ pub struct SessionRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EqBand {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub band_type: String,
+    pub frequency: f32,
+    pub gain: f32,
+    pub q: f32,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EqProfile {
+    pub id: String,
+    pub name: String,
+    pub bands: Vec<EqBand>,
+    #[serde(default)]
+    pub bypass: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub display_name: String,
     pub recording_folder: Option<String>,
@@ -78,10 +98,19 @@ pub struct AppSettings {
     /// "dark" | "light" — UI appearance preference
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// User-saved voice EQ profiles (builtins live in the UI).
+    #[serde(default)]
+    pub eq_profiles: Vec<EqProfile>,
+    #[serde(default = "default_eq_profile_id")]
+    pub active_eq_profile_id: String,
 }
 
 fn default_theme() -> String {
     "light".into()
+}
+
+fn default_eq_profile_id() -> String {
+    "flat".into()
 }
 
 impl Default for AppSettings {
@@ -97,6 +126,8 @@ impl Default for AppSettings {
             preferred_mic_id: None,
             preferred_speaker_id: None,
             theme: default_theme(),
+            eq_profiles: Vec::new(),
+            active_eq_profile_id: default_eq_profile_id(),
         }
     }
 }

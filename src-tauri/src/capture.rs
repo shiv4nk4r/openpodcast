@@ -1,4 +1,5 @@
-use crate::models::DeviceInfo;
+use crate::eq::EqChain;
+use crate::models::{DeviceInfo, EqBand};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{WavSpec, WavWriter};
 use parking_lot::Mutex;
@@ -19,15 +20,16 @@ fn amplify_f32(sample: f32) -> i16 {
         .clamp(i16::MIN as f32, i16::MAX as f32) as i16
 }
 
-fn amplify_i16(sample: i16) -> i16 {
-    amplify_f32(sample as f32 / i16::MAX as f32)
-}
-
 pub struct AudioRecorder {
     stop: Arc<AtomicBool>,
     level: Arc<Mutex<f32>>,
     path: PathBuf,
     join: Option<std::thread::JoinHandle<()>>,
+}
+
+pub struct EqCaptureConfig {
+    pub bands: Vec<EqBand>,
+    pub bypass: bool,
 }
 
 impl AudioRecorder {
@@ -47,7 +49,11 @@ impl AudioRecorder {
         Ok(devices)
     }
 
-    pub fn start(path: PathBuf, device_name: Option<String>) -> Result<Self, String> {
+    pub fn start(
+        path: PathBuf,
+        device_name: Option<String>,
+        eq: Option<EqCaptureConfig>,
+    ) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let level = Arc::new(Mutex::new(0.0f32));
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
@@ -55,6 +61,10 @@ impl AudioRecorder {
         let stop_c = stop.clone();
         let level_c = level.clone();
         let path_c = path.clone();
+        let eq_cfg = eq.unwrap_or(EqCaptureConfig {
+            bands: Vec::new(),
+            bypass: true,
+        });
 
         let join = std::thread::spawn(move || {
             let result = (|| -> Result<(), String> {
@@ -88,50 +98,71 @@ impl AudioRecorder {
                 let stop_cb = stop_c.clone();
                 let level_cb = level_c.clone();
 
+                let eq_chain = Arc::new(Mutex::new(EqChain::new(
+                    &eq_cfg.bands,
+                    eq_cfg.bypass,
+                    sample_rate as f32,
+                    channels as usize,
+                )));
+
                 let stream = match sample_format {
-                    cpal::SampleFormat::F32 => device
-                        .build_input_stream(
-                            &config.into(),
-                            move |data: &[f32], _| {
-                                if stop_cb.load(Ordering::Relaxed) {
-                                    return;
-                                }
-                                let mut peak = 0.0f32;
-                                if let Some(w) = writer_cb.lock().as_mut() {
-                                    for &s in data {
-                                        let boosted = s * INPUT_GAIN;
-                                        peak = peak.max(boosted.abs().min(1.0));
-                                        let _ = w.write_sample(amplify_f32(s));
+                    cpal::SampleFormat::F32 => {
+                        let eq_cb = eq_chain.clone();
+                        device
+                            .build_input_stream(
+                                &config.into(),
+                                move |data: &[f32], _| {
+                                    if stop_cb.load(Ordering::Relaxed) {
+                                        return;
                                     }
-                                }
-                                *level_cb.lock() = peak;
-                            },
-                            |e| eprintln!("audio stream error: {e}"),
-                            None,
-                        )
-                        .map_err(|e| e.to_string())?,
-                    cpal::SampleFormat::I16 => device
-                        .build_input_stream(
-                            &config.into(),
-                            move |data: &[i16], _| {
-                                if stop_cb.load(Ordering::Relaxed) {
-                                    return;
-                                }
-                                let mut peak = 0.0f32;
-                                if let Some(w) = writer_cb.lock().as_mut() {
-                                    for &s in data {
-                                        let out = amplify_i16(s);
-                                        peak = peak
-                                            .max((out as f32).abs() / i16::MAX as f32);
-                                        let _ = w.write_sample(out);
+                                    let mut peak = 0.0f32;
+                                    let mut eq = eq_cb.lock();
+                                    if let Some(w) = writer_cb.lock().as_mut() {
+                                        let ch = channels as usize;
+                                        for (i, &s) in data.iter().enumerate() {
+                                            let processed =
+                                                eq.process_sample_f32(s, i % ch.max(1));
+                                            peak = peak.max((processed * INPUT_GAIN).abs().min(1.0));
+                                            let _ = w.write_sample(amplify_f32(processed));
+                                        }
                                     }
-                                }
-                                *level_cb.lock() = peak;
-                            },
-                            |e| eprintln!("audio stream error: {e}"),
-                            None,
-                        )
-                        .map_err(|e| e.to_string())?,
+                                    *level_cb.lock() = peak;
+                                },
+                                |e| eprintln!("audio stream error: {e}"),
+                                None,
+                            )
+                            .map_err(|e| e.to_string())?
+                    }
+                    cpal::SampleFormat::I16 => {
+                        let eq_cb = eq_chain.clone();
+                        device
+                            .build_input_stream(
+                                &config.into(),
+                                move |data: &[i16], _| {
+                                    if stop_cb.load(Ordering::Relaxed) {
+                                        return;
+                                    }
+                                    let mut peak = 0.0f32;
+                                    let mut eq = eq_cb.lock();
+                                    if let Some(w) = writer_cb.lock().as_mut() {
+                                        let ch = channels as usize;
+                                        for (i, &s) in data.iter().enumerate() {
+                                            let f = s as f32 / i16::MAX as f32;
+                                            let processed =
+                                                eq.process_sample_f32(f, i % ch.max(1));
+                                            let out = amplify_f32(processed);
+                                            peak = peak
+                                                .max((out as f32).abs() / i16::MAX as f32);
+                                            let _ = w.write_sample(out);
+                                        }
+                                    }
+                                    *level_cb.lock() = peak;
+                                },
+                                |e| eprintln!("audio stream error: {e}"),
+                                None,
+                            )
+                            .map_err(|e| e.to_string())?
+                    }
                     other => return Err(format!("Unsupported sample format: {other:?}")),
                 };
 
@@ -172,8 +203,6 @@ impl AudioRecorder {
     pub fn stop(mut self) -> PathBuf {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(j) = self.join.take() {
-            // cpal stream teardown can stall on some macOS devices — don't
-            // block the whole guest "Saving…" modal forever.
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
                 let _ = j.join();

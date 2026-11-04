@@ -1,5 +1,6 @@
 mod aec;
 mod capture;
+mod eq;
 mod db;
 mod drive;
 mod export;
@@ -665,10 +666,16 @@ fn start_audio_recording(
     session_id: String,
     participant_id: String,
     device_name: Option<String>,
+    eq_bands: Option<Vec<EqBand>>,
+    eq_bypass: Option<bool>,
 ) -> Result<String, String> {
     let dir = ensure_recording_dir(&state, &session_id)?;
     let path = dir.join(format!("{participant_id}-audio.wav"));
-    let recorder = AudioRecorder::start(path.clone(), device_name)?;
+    let eq = Some(capture::EqCaptureConfig {
+        bands: eq_bands.unwrap_or_default(),
+        bypass: eq_bypass.unwrap_or(false),
+    });
+    let recorder = AudioRecorder::start(path.clone(), device_name, eq)?;
     state
         .recorders
         .lock()

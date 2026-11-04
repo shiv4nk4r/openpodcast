@@ -34,12 +34,17 @@ import { api } from "../api";
 import { LiveCameraPreview } from "../components/LiveCameraPreview";
 import { Select } from "../components/Select";
 import { TransferProgressBar } from "../components/TransferProgressBar";
+import { VoiceProfileSelect } from "../components/VoiceProfileSelect";
 import { pickPreferred, useDeviceList } from "../hooks/useDeviceList";
 import { blobToUint8, useLocalMedia } from "../hooks/useLocalMedia";
 import {
   useRemotePeerVideo,
   useStudioPreview,
 } from "../hooks/useStudioPreview";
+import {
+  resolveEqProfile,
+  type EqBandType,
+} from "../lib/eq";
 import {
   firstJoinOffsetsMs,
 } from "../lib/presence";
@@ -205,6 +210,13 @@ export default function Recording() {
   const navigate = useNavigate();
   const videoMode = studio?.settings.mode === "audio_video";
   const deviceList = useDeviceList();
+  const eqFromSettings = resolveEqProfile(
+    settings.active_eq_profile_id || "flat",
+    (settings.eq_profiles ?? []).map((p) => ({
+      ...p,
+      bands: p.bands.map((b) => ({ ...b, type: b.type as EqBandType })),
+    })),
+  );
   const media = useLocalMedia({
     video: !!videoMode,
     audio: true,
@@ -213,9 +225,21 @@ export default function Recording() {
     skipAutoStart: true,
     resolution: studio?.settings.resolution,
     frameRate: studio?.settings.frame_rate,
+    eqProfile: eqFromSettings,
   });
 
   const [peers, setPeers] = useState<PeerInfo[]>([]);
+  const liveEqRef = useRef(eqFromSettings);
+  liveEqRef.current =
+    liveEqRef.current.id === eqFromSettings.id
+      ? liveEqRef.current
+      : eqFromSettings;
+  const applyEqRef = useRef(media.applyEqProfile);
+  applyEqRef.current = media.applyEqProfile;
+  const applyLiveEq = useCallback((profile: typeof eqFromSettings) => {
+    liveEqRef.current = profile;
+    applyEqRef.current(profile);
+  }, []);
   const [inviteOpen, setInviteOpen] = useState(true);
   const [inviteCopied, setInviteCopied] = useState(false);
   const [sideTab, setSideTab] = useState<SideTab>("people");
@@ -929,11 +953,15 @@ export default function Recording() {
     }
 
     try {
-      await api.startAudioRecording(
-        active.sessionId,
-        active.participantId,
-        deviceList.mics.find((d) => d.deviceId === audioDevice)?.label,
-      );
+      {
+        const eq = liveEqRef.current;
+        await api.startAudioRecording(
+          active.sessionId,
+          active.participantId,
+          deviceList.mics.find((d) => d.deviceId === audioDevice)?.label,
+          { bands: eq.bands, bypass: eq.bypass },
+        );
+      }
     } catch {
       /* MediaRecorder still captures */
     }
@@ -1879,6 +1907,7 @@ export default function Recording() {
                           }))}
                           emptyLabel="No microphone found"
                         />
+                        <VoiceProfileSelect applyToMedia={applyLiveEq} />
                         <label className="toggle">
                           <span>Echo Cancellation (AEC3)</span>
                           <input

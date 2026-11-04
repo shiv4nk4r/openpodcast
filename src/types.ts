@@ -44,6 +44,23 @@ export interface SessionRecord {
   drive_uploaded: boolean;
 }
 
+/** Voice EQ band — mirrors src/lib/eq.ts / Rust EqBand. */
+export interface EqBandSettings {
+  id: string;
+  type: string;
+  frequency: number;
+  gain: number;
+  q: number;
+  enabled: boolean;
+}
+
+export interface EqProfileSettings {
+  id: string;
+  name: string;
+  bands: EqBandSettings[];
+  bypass: boolean;
+}
+
 export interface AppSettings {
   display_name: string;
   recording_folder: string | null;
@@ -56,6 +73,10 @@ export interface AppSettings {
   preferred_speaker_id: string | null;
   /** "dark" | "light" */
   theme: string;
+  /** User-saved EQ profiles (builtins live in code). */
+  eq_profiles: EqProfileSettings[];
+  /** Builtin or saved profile id. */
+  active_eq_profile_id: string;
 }
 
 export interface InviteTicket {

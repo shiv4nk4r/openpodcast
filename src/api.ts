@@ -79,11 +79,14 @@ export const api = {
     sessionId: string,
     participantId: string,
     deviceName?: string,
+    eq?: { bands: unknown[]; bypass: boolean },
   ) =>
     invoke<string>("start_audio_recording", {
       sessionId,
       participantId,
       deviceName: deviceName ?? null,
+      eqBands: eq?.bands ?? null,
+      eqBypass: eq?.bypass ?? null,
     }),
   getMicLevel: (participantId: string) =>
     invoke<number>("get_mic_level", { participantId }),

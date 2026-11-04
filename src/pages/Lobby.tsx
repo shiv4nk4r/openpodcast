@@ -15,14 +15,41 @@ import {
 import { api } from "../api";
 import { LiveCameraPreview } from "../components/LiveCameraPreview";
 import { Select } from "../components/Select";
+import { VoiceProfileSelect } from "../components/VoiceProfileSelect";
 import { pickPreferred, useDeviceList } from "../hooks/useDeviceList";
 import { useLocalMedia } from "../hooks/useLocalMedia";
+import { resolveEqProfile, type EqBandType, type EqProfile } from "../lib/eq";
 import {
   FRAME_RATE_OPTIONS,
   RESOLUTION_OPTIONS,
 } from "../lib/studioQuality";
 import { useApp } from "../state";
 import type { StudioMode } from "../types";
+
+function settingsToEqProfile(
+  activeId: string,
+  saved: {
+    id: string;
+    name: string;
+    bands: {
+      id: string;
+      type: string;
+      frequency: number;
+      gain: number;
+      q: number;
+      enabled: boolean;
+    }[];
+    bypass: boolean;
+  }[],
+): EqProfile {
+  return resolveEqProfile(
+    activeId,
+    saved.map((p) => ({
+      ...p,
+      bands: p.bands.map((b) => ({ ...b, type: b.type as EqBandType })),
+    })),
+  );
+}
 
 type Panel = "host" | "invite";
 
@@ -54,6 +81,10 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
   const canEditQuality = studio?.role !== "guest";
 
   const deviceList = useDeviceList();
+  const initialEq = settingsToEqProfile(
+    settings.active_eq_profile_id || "flat",
+    settings.eq_profiles ?? [],
+  );
   const media = useLocalMedia({
     video: videoMode,
     audio: true,
@@ -62,6 +93,7 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
     skipAutoStart: true,
     resolution,
     frameRate: fps,
+    eqProfile: initialEq,
   });
 
   const [name, setName] = useState(settings.display_name || "");
@@ -98,16 +130,23 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
 
   const micTestBlock = (
     <div className="rs-mic-test">
-      <button
-        type="button"
-        className={`rs-mic-test-btn${media.monitoring ? " is-active" : ""}`}
-        onClick={() => void toggleMicTest()}
-        disabled={!media.ready}
-        aria-pressed={media.monitoring}
-      >
-        <IconEar size={18} stroke={1.75} />
-        {media.monitoring ? "Stop mic test" : "Test microphone"}
-      </button>
+      <div className="rs-mic-test-row">
+        <button
+          type="button"
+          className={`rs-mic-test-btn${media.monitoring ? " is-active" : ""}`}
+          onClick={() => void toggleMicTest()}
+          disabled={!media.ready}
+          aria-pressed={media.monitoring}
+        >
+          <IconEar size={18} stroke={1.75} />
+          {media.monitoring ? "Stop mic test" : "Test microphone"}
+        </button>
+        <VoiceProfileSelect
+          className="rs-mic-profile"
+          disabled={!media.ready}
+          applyToMedia={media.applyEqProfile}
+        />
+      </div>
       {media.monitoring && (
         <p className="rs-mic-test-hint">
           Speak normally — you should hear yourself in the speakers

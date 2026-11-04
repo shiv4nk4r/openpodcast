@@ -34,6 +34,8 @@ const defaultSettings: AppSettings = {
   preferred_mic_id: null,
   preferred_speaker_id: null,
   theme: "light",
+  eq_profiles: [],
+  active_eq_profile_id: "flat",
 };
 
 export function AppProvider({ children }: { children: ReactNode }) {

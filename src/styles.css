@@ -3135,6 +3135,13 @@ a {
   margin: 0 0 16px;
 }
 
+.rs-mic-test-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  align-items: end;
+}
+
 .rs-mic-test-btn {
   width: 100%;
   display: inline-flex;
@@ -3149,6 +3156,22 @@ a {
   font-weight: 700;
   font-size: 0.92rem;
   transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  min-height: 48px;
+}
+
+.rs-mic-profile {
+  margin: 0;
+}
+
+.rs-mic-profile .op-field-label {
+  display: none;
+}
+
+.rs-mic-profile .op-select-trigger {
+  min-height: 48px;
+  border-radius: 12px;
+  font-weight: 700;
+  font-size: 0.92rem;
 }
 
 .rs-mic-test-btn:hover:not(:disabled) {
