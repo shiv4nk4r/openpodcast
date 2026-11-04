@@ -110,7 +110,7 @@ fn default_theme() -> String {
 }
 
 fn default_eq_profile_id() -> String {
-    "flat".into()
+    "broadcast".into()
 }
 
 impl Default for AppSettings {

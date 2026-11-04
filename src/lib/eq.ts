@@ -63,8 +63,8 @@ export function makeFlatBands(): EqBand[] {
 export const MAX_EQ_SLOTS = 8;
 
 /**
- * Studio-grade voice presets — gentle curves that stay under ~±3 dB so AGC +
- * P2P PCM don’t clip into crackle on the far end.
+ * Voice profiles sit on top of the always-on polish chain (rumble HPF, mild
+ * de-ess, speech leveler, soft peak limit). Keep these musical and under ~±2.5 dB.
  */
 export const BUILTIN_EQ_PROFILES: EqProfile[] = [
   {
@@ -72,87 +72,85 @@ export const BUILTIN_EQ_PROFILES: EqProfile[] = [
     name: "Flat",
     builtin: true,
     bypass: false,
+    // Subtle polish even on “Flat” — always-on chain does most of the work.
     bands: makeFlatBands(),
   },
   {
-    // Classic podcast chain: rumble out, mud down, presence + soft air.
+    // Default podcast voice: clearer midrange, less mud.
     id: "broadcast",
     name: "Broadcast",
     builtin: true,
     bypass: false,
     bands: [
-      band("bc-hp", "highpass", 80, 0, 0.707),
-      band("bc-mud", "peaking", 250, -2.0, 0.9),
-      band("bc-presence", "peaking", 3200, 2.0, 1.0),
-      band("bc-air", "highshelf", 10000, 1.0, 0.7),
+      band("bc-mud", "peaking", 240, -2.0, 0.85),
+      band("bc-box", "peaking", 550, -0.8, 1.1),
+      band("bc-presence", "peaking", 2800, 2.0, 0.9),
+      band("bc-air", "highshelf", 9500, 1.0, 0.7),
     ],
   },
   {
-    // Rounder chest tone; softens spit/harshness for bright condensers.
+    // Rounder chest; softer top for bright condensers.
     id: "warm",
     name: "Warm",
     builtin: true,
     bypass: false,
     bands: [
-      band("wm-hp", "highpass", 70, 0, 0.707),
-      band("wm-body", "lowshelf", 160, 2.0, 0.7),
-      band("wm-mud", "peaking", 280, -1.0, 1.0),
-      band("wm-harsh", "peaking", 4500, -1.5, 1.2),
-      band("wm-air", "highshelf", 9000, -1.0, 0.7),
+      band("wm-body", "lowshelf", 150, 2.0, 0.7),
+      band("wm-mud", "peaking", 300, -1.0, 1.0),
+      band("wm-harsh", "peaking", 4200, -1.5, 1.1),
+      band("wm-air", "highshelf", 9000, -0.8, 0.7),
     ],
   },
   {
-    // Clarity for dull / distant mics — presence without sizzle.
+    // Clarity for dull / distant mics.
     id: "bright",
     name: "Bright",
     builtin: true,
     bypass: false,
     bands: [
-      band("br-hp", "highpass", 85, 0, 0.707),
-      band("br-mud", "peaking", 250, -2.0, 0.9),
-      band("br-presence", "peaking", 4000, 2.0, 1.0),
-      band("br-sib", "peaking", 7000, -1.0, 1.5),
-      band("br-air", "highshelf", 11000, 1.5, 0.7),
+      band("br-mud", "peaking", 250, -1.5, 0.9),
+      band("br-presence", "peaking", 3600, 2.2, 0.95),
+      band("br-sib", "peaking", 7200, -1.2, 1.6),
+      band("br-air", "highshelf", 10500, 1.2, 0.7),
     ],
   },
   {
-    // Desk / HVAC / handling noise — cut lows, leave speech alone.
+    // Extra low cut for desk / HVAC / handling noise.
     id: "cut-rumble",
     name: "Cut rumble",
     builtin: true,
     bypass: false,
     bands: [
-      band("cr-hp", "highpass", 100, 0, 0.707),
-      band("cr-low", "lowshelf", 140, -3.5, 0.7),
-      band("cr-mud", "peaking", 200, -1.5, 1.0),
-      band("cr-presence", "peaking", 3000, 0.5, 1.0),
+      band("cr-hp", "highpass", 110, 0, 0.707),
+      band("cr-low", "lowshelf", 150, -3.0, 0.7),
+      band("cr-mud", "peaking", 220, -1.2, 1.0),
+      band("cr-presence", "peaking", 3000, 0.6, 1.0),
     ],
   },
   {
-    // Deeper chest / baritone weight — modest so it doesn’t clip.
+    // Deeper chest / baritone weight.
     id: "deep",
     name: "Deep",
     builtin: true,
     bypass: false,
     bands: [
-      band("dp-hp", "highpass", 65, 0, 0.707),
-      band("dp-chest", "lowshelf", 140, 2.5, 0.7),
+      band("dp-chest", "lowshelf", 135, 2.2, 0.7),
       band("dp-mud", "peaking", 320, -1.0, 1.0),
-      band("dp-air", "highshelf", 9000, -1.0, 0.7),
+      band("dp-presence", "peaking", 2200, 0.6, 1.0),
+      band("dp-air", "highshelf", 9000, -0.8, 0.7),
     ],
   },
   {
-    // Higher / lighter voices — less boom, clearer top.
+    // Lighter / higher voices — less boom, open top.
     id: "high",
     name: "High",
     builtin: true,
     bypass: false,
     bands: [
-      band("hi-hp", "highpass", 110, 0, 0.707),
-      band("hi-low", "lowshelf", 160, -3.0, 0.7),
-      band("hi-mud", "peaking", 250, -1.5, 0.9),
-      band("hi-presence", "peaking", 3800, 1.5, 1.0),
-      band("hi-air", "highshelf", 11000, 1.5, 0.7),
+      band("hi-hp", "highpass", 100, 0, 0.707),
+      band("hi-low", "lowshelf", 170, -2.5, 0.7),
+      band("hi-presence", "peaking", 3500, 1.6, 1.0),
+      band("hi-air", "highshelf", 10500, 1.2, 0.7),
     ],
   },
 ];
@@ -190,12 +188,13 @@ export function makeupGainForProfile(profile: EqProfile): number {
     if (b.gain < 0) cut += -b.gain;
     else boost += b.gain;
   }
-  // Recover some of the cut energy; never pile on top of big boosts.
-  const db = Math.min(5, Math.max(0, cut * 0.35 - boost * 0.15));
+  // Recover cut energy + a little headroom for the speech leveler.
+  const db = Math.min(6, Math.max(1.0, cut * 0.4 - boost * 0.12 + 1.0));
   return Math.pow(10, db / 20);
 }
 
-export const DEFAULT_EQ_PROFILE_ID = "flat";
+/** Best out-of-the-box podcast sound for new installs. */
+export const DEFAULT_EQ_PROFILE_ID = "broadcast";
 
 export function newBandId(): string {
   return crypto.randomUUID();

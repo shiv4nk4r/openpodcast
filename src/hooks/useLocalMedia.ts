@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   applyBandToFilter,
   cloneProfile,
+  DEFAULT_EQ_PROFILE_ID,
   makeupGainForProfile,
   MAX_EQ_SLOTS,
   padBandsToSlots,
@@ -54,7 +55,7 @@ export function useLocalMedia(opts: {
   const eqProfileRef = useRef<EqProfile>(
     opts.eqProfile
       ? cloneProfile(opts.eqProfile)
-      : resolveEqProfile("flat", []),
+      : resolveEqProfile(DEFAULT_EQ_PROFILE_ID, []),
   );
   const processedDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   /** Bumps when the outbound MediaStream is replaced (device restart only). */
@@ -94,7 +95,7 @@ export function useLocalMedia(opts: {
     const audioTracks = raw.getAudioTracks();
     if (!audioTracks.length) return null;
 
-    const ctx = new AudioContext();
+    const ctx = new AudioContext({ latencyHint: "interactive" });
     audioCtxRef.current = ctx;
     void ctx.resume();
 
@@ -106,16 +107,42 @@ export function useLocalMedia(opts: {
     analyser.fftSize = 2048;
     analyser.smoothingTimeConstant = 0.8;
 
+    // Always-on polish (before profile EQ): kill rumble + tame harsh esses.
+    const rumbleHpf = ctx.createBiquadFilter();
+    rumbleHpf.type = "highpass";
+    rumbleHpf.frequency.value = 70;
+    rumbleHpf.Q.value = 0.707;
+
+    const deEss = ctx.createBiquadFilter();
+    deEss.type = "peaking";
+    deEss.frequency.value = 6500;
+    deEss.Q.value = 2.2;
+    deEss.gain.value = -1.5;
+
+    // Gentle speech leveler — more consistent volume without pumping.
+    const voiceComp = ctx.createDynamicsCompressor();
+    voiceComp.threshold.value = -26;
+    voiceComp.knee.value = 14;
+    voiceComp.ratio.value = 2.4;
+    voiceComp.attack.value = 0.015;
+    voiceComp.release.value = 0.22;
+
     const makeup = ctx.createGain();
     makeupGainRef.current = makeup;
 
-    // Soft limiter — stops EQ boosts from hard-clipping into crackle on P2P PCM.
+    // Peak safety only — transparent until near full scale.
     const limiter = ctx.createDynamicsCompressor();
-    limiter.threshold.value = -8;
-    limiter.knee.value = 8;
-    limiter.ratio.value = 12;
-    limiter.attack.value = 0.003;
-    limiter.release.value = 0.12;
+    limiter.threshold.value = -2.5;
+    limiter.knee.value = 4;
+    limiter.ratio.value = 18;
+    limiter.attack.value = 0.001;
+    limiter.release.value = 0.08;
+
+    // Tiny presence lift after dynamics — “radio polish” without harshness.
+    const airShelf = ctx.createBiquadFilter();
+    airShelf.type = "highshelf";
+    airShelf.frequency.value = 8500;
+    airShelf.gain.value = 0.8;
 
     const monitorGain = ctx.createGain();
     monitorGain.gain.value = monitoringDesiredRef.current ? 1 : 0;
@@ -128,16 +155,21 @@ export function useLocalMedia(opts: {
     }
     eqFiltersRef.current = filters;
 
-    let prev: AudioNode = source;
+    // mic → rumble HPF → profile EQ → de-ess → voice compressor → makeup → peak lim → air → out
+    source.connect(rumbleHpf);
+    let prev: AudioNode = rumbleHpf;
     for (const f of filters) {
       prev.connect(f);
       prev = f;
     }
-    prev.connect(makeup);
+    prev.connect(deEss);
+    deEss.connect(voiceComp);
+    voiceComp.connect(makeup);
     makeup.connect(limiter);
-    limiter.connect(dest);
-    limiter.connect(analyser);
-    limiter.connect(monitorGain);
+    limiter.connect(airShelf);
+    airShelf.connect(dest);
+    airShelf.connect(analyser);
+    airShelf.connect(monitorGain);
     monitorGain.connect(ctx.destination);
 
     applyProfileToGraph(eqProfileRef.current);
@@ -204,8 +236,11 @@ export function useLocalMedia(opts: {
                   ? { deviceId: { ideal: deviceIds.audio } }
                   : {}),
                 echoCancellation: opts.echoCancellation ?? false,
+                // Browser NS ducks speech; we polish in the Web Audio graph instead.
                 noiseSuppression: false,
                 autoGainControl: true,
+                channelCount: { ideal: 1 },
+                sampleRate: { ideal: 48000 },
               }
             : false;
         const videoConstraints = (

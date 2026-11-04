@@ -1,6 +1,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { resampleCubic, softClip } from "../lib/audioDsp";
 
 type PreviewEvent = {
   participant_id: string;
@@ -51,39 +52,13 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
 
 function encodePcm16k(input: Float32Array, inputRate: number): Uint8Array {
   if (input.length === 0) return new Uint8Array();
-  const outLen = Math.max(1, Math.round((input.length * PCM_RATE) / inputRate));
-  const out = new Int16Array(outLen);
-  const scale = (input.length - 1) / Math.max(1, outLen - 1);
-  for (let i = 0; i < outLen; i++) {
-    const src = i * scale;
-    const i0 = Math.floor(src);
-    const i1 = Math.min(input.length - 1, i0 + 1);
-    const t = src - i0;
-    const s = input[i0] * (1 - t) + input[i1] * t;
-    // Soft clip — hard int16 clamp was turning EQ peaks into speaker crackle.
-    const soft = Math.tanh(s * 1.05);
+  const resampled = resampleCubic(input, inputRate, PCM_RATE);
+  const out = new Int16Array(resampled.length);
+  for (let i = 0; i < resampled.length; i++) {
+    const soft = softClip(resampled[i]);
     out[i] = soft < 0 ? soft * 0x8000 : soft * 0x7fff;
   }
   return new Uint8Array(out.buffer);
-}
-
-function resampleLinear(
-  input: Float32Array,
-  fromRate: number,
-  toRate: number,
-): Float32Array {
-  if (fromRate === toRate || input.length === 0) return input;
-  const outLen = Math.max(1, Math.round((input.length * toRate) / fromRate));
-  const out = new Float32Array(outLen);
-  const scale = (input.length - 1) / Math.max(1, outLen - 1);
-  for (let i = 0; i < outLen; i++) {
-    const src = i * scale;
-    const i0 = Math.floor(src);
-    const i1 = Math.min(input.length - 1, i0 + 1);
-    const t = src - i0;
-    out[i] = input[i0] * (1 - t) + input[i1] * t;
-  }
-  return out;
 }
 
 /** Ring stores samples at the AudioContext's native rate. */
@@ -199,16 +174,21 @@ export function useStudioPreview(opts: {
             out[i] += mixScratch[i] * gain;
           }
         }
-        // Soft clip after summing peers.
+        // Soft clip after summing peers — avoids hard-edge crackle.
         for (let i = 0; i < out.length; i++) {
-          const s = out[i];
-          out[i] = s < -1 ? -1 : s > 1 ? 1 : s;
+          out[i] = softClip(out[i]);
         }
       };
       playGain = playCtx.createGain();
-      playGain.gain.value = 1;
+      playGain.gain.value = 1.05;
+      // Mild high shelf cut on playback — less fatiguing over headphones.
+      const playTone = playCtx.createBiquadFilter();
+      playTone.type = "highshelf";
+      playTone.frequency.value = 10000;
+      playTone.gain.value = -0.8;
       playProc.connect(playGain);
-      playGain.connect(playCtx.destination);
+      playGain.connect(playTone);
+      playTone.connect(playCtx.destination);
     } catch {
       /* playback optional */
     }
@@ -241,7 +221,7 @@ export function useStudioPreview(opts: {
             ring = new PcmRing(capacity, target);
             rings.set(p.participant_id, ring);
           }
-          ring.push(resampleLinear(f32, PCM_RATE, ctxRate));
+          ring.push(resampleCubic(f32, PCM_RATE, ctxRate));
         });
       } catch {
         /* browser preview without Tauri */

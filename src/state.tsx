@@ -35,7 +35,7 @@ const defaultSettings: AppSettings = {
   preferred_speaker_id: null,
   theme: "light",
   eq_profiles: [],
-  active_eq_profile_id: "flat",
+  active_eq_profile_id: "broadcast",
 };
 
 export function AppProvider({ children }: { children: ReactNode }) {

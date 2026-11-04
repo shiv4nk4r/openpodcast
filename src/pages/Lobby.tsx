@@ -18,7 +18,12 @@ import { Select } from "../components/Select";
 import { VoiceProfileSelect } from "../components/VoiceProfileSelect";
 import { pickPreferred, useDeviceList } from "../hooks/useDeviceList";
 import { useLocalMedia } from "../hooks/useLocalMedia";
-import { resolveEqProfile, type EqBandType, type EqProfile } from "../lib/eq";
+import {
+  DEFAULT_EQ_PROFILE_ID,
+  resolveEqProfile,
+  type EqBandType,
+  type EqProfile,
+} from "../lib/eq";
 import {
   FRAME_RATE_OPTIONS,
   RESOLUTION_OPTIONS,
@@ -82,7 +87,7 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
 
   const deviceList = useDeviceList();
   const initialEq = settingsToEqProfile(
-    settings.active_eq_profile_id || "flat",
+    settings.active_eq_profile_id || DEFAULT_EQ_PROFILE_ID,
     settings.eq_profiles ?? [],
   );
   const media = useLocalMedia({

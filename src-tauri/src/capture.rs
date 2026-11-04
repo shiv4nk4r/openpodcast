@@ -8,13 +8,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 
-/// Laptop / USB mics often peak well below full scale. Boost into a usable
-/// range, then soft-limit so we don't hard-clip on louder speech.
-const INPUT_GAIN: f32 = 3.0; // ~9.5 dB
+/// Laptop / USB mics often sit quiet. Mild boost + soft knee — less crunchy
+/// than a hard ×3 into tanh.
+const INPUT_GAIN: f32 = 2.35; // ~7.4 dB
 
 fn amplify_f32(sample: f32) -> i16 {
-    // Soft clip via tanh keeps peaks musical instead of brickwall-distorted
-    let shaped = (sample * INPUT_GAIN).tanh();
+    let x = sample * INPUT_GAIN;
+    // Soft knee past ~0.85 keeps loud speech musical instead of fuzzy.
+    let shaped = if x.abs() <= 0.85 {
+        x
+    } else {
+        let sign = if x >= 0.0 { 1.0 } else { -1.0 };
+        sign * (0.85 + 0.15 * ((x.abs() - 0.85) * 2.2).tanh())
+    };
     (shaped * i16::MAX as f32)
         .round()
         .clamp(i16::MIN as f32, i16::MAX as f32) as i16

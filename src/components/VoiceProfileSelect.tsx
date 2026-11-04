@@ -3,6 +3,7 @@ import { IconAdjustments } from "@tabler/icons-react";
 import { Select } from "./Select";
 import {
   allEqProfiles,
+  DEFAULT_EQ_PROFILE_ID,
   resolveEqProfile,
   type EqBandType,
   type EqProfile,
@@ -45,7 +46,7 @@ export function VoiceProfileSelect({
     [settings.eq_profiles],
   );
   const catalog = useMemo(() => allEqProfiles(saved), [saved]);
-  const activeId = settings.active_eq_profile_id || "flat";
+  const activeId = settings.active_eq_profile_id || DEFAULT_EQ_PROFILE_ID;
 
   return (
     <Select

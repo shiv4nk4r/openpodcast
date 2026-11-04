@@ -42,6 +42,7 @@ import {
   useStudioPreview,
 } from "../hooks/useStudioPreview";
 import {
+  DEFAULT_EQ_PROFILE_ID,
   resolveEqProfile,
   type EqBandType,
 } from "../lib/eq";
@@ -211,7 +212,7 @@ export default function Recording() {
   const videoMode = studio?.settings.mode === "audio_video";
   const deviceList = useDeviceList();
   const eqFromSettings = resolveEqProfile(
-    settings.active_eq_profile_id || "flat",
+    settings.active_eq_profile_id || DEFAULT_EQ_PROFILE_ID,
     (settings.eq_profiles ?? []).map((p) => ({
       ...p,
       bands: p.bands.map((b) => ({ ...b, type: b.type as EqBandType })),
