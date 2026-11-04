@@ -60,8 +60,9 @@ function encodePcm16k(input: Float32Array, inputRate: number): Uint8Array {
     const i1 = Math.min(input.length - 1, i0 + 1);
     const t = src - i0;
     const s = input[i0] * (1 - t) + input[i1] * t;
-    const clipped = Math.max(-1, Math.min(1, s));
-    out[i] = clipped < 0 ? clipped * 0x8000 : clipped * 0x7fff;
+    // Soft clip — hard int16 clamp was turning EQ peaks into speaker crackle.
+    const soft = Math.tanh(s * 1.05);
+    out[i] = soft < 0 ? soft * 0x8000 : soft * 0x7fff;
   }
   return new Uint8Array(out.buffer);
 }
@@ -145,6 +146,8 @@ export function useStudioPreview(opts: {
   participantId: string;
   getVideoEl: () => HTMLVideoElement | null;
   getStream: () => MediaStream | null;
+  /** When capture remounts (new MediaStream), re-tap audio for P2P. */
+  streamEpoch?: number;
   camOn: boolean;
   micOn: boolean;
   /** Local listen levels for remote peers (0 = mute, 1 = default, up to 2). */
@@ -395,6 +398,7 @@ export function useStudioPreview(opts: {
     opts.micOn,
     opts.getVideoEl,
     opts.getStream,
+    opts.streamEpoch,
   ]);
 
   return { admitted };

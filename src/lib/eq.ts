@@ -59,9 +59,12 @@ export function makeFlatBands(): EqBand[] {
   ];
 }
 
+/** Fixed Web Audio EQ slots so profile switches never remount the MediaStream. */
+export const MAX_EQ_SLOTS = 8;
+
 /**
- * Studio-grade voice presets — gentle broadcast curves, not “consumer boost”
- * stacks. Tuned for spoken word over USB / XLR mics (close-mic podcast style).
+ * Studio-grade voice presets — gentle curves that stay under ~±3 dB so AGC +
+ * P2P PCM don’t clip into crackle on the far end.
  */
 export const BUILTIN_EQ_PROFILES: EqProfile[] = [
   {
@@ -72,89 +75,125 @@ export const BUILTIN_EQ_PROFILES: EqProfile[] = [
     bands: makeFlatBands(),
   },
   {
-    // Classic podcast / talk-radio chain: rumble out, mud down, presence + air.
+    // Classic podcast chain: rumble out, mud down, presence + soft air.
     id: "broadcast",
     name: "Broadcast",
     builtin: true,
     bypass: false,
     bands: [
       band("bc-hp", "highpass", 80, 0, 0.707),
-      band("bc-mud", "peaking", 220, -3.0, 0.9),
-      band("bc-body", "peaking", 180, 1.0, 1.1),
-      band("bc-presence", "peaking", 3200, 2.5, 1.0),
-      band("bc-air", "highshelf", 10000, 1.5, 0.7),
+      band("bc-mud", "peaking", 250, -2.0, 0.9),
+      band("bc-presence", "peaking", 3200, 2.0, 1.0),
+      band("bc-air", "highshelf", 10000, 1.0, 0.7),
     ],
   },
   {
-    // Rounder chest tone; softens spit/harshness for bright condenser mics.
+    // Rounder chest tone; softens spit/harshness for bright condensers.
     id: "warm",
     name: "Warm",
     builtin: true,
     bypass: false,
     bands: [
       band("wm-hp", "highpass", 70, 0, 0.707),
-      band("wm-body", "lowshelf", 160, 2.5, 0.7),
-      band("wm-mud", "peaking", 280, -1.5, 1.0),
-      band("wm-harsh", "peaking", 4500, -2.0, 1.2),
-      band("wm-air", "highshelf", 9000, -1.5, 0.7),
+      band("wm-body", "lowshelf", 160, 2.0, 0.7),
+      band("wm-mud", "peaking", 280, -1.0, 1.0),
+      band("wm-harsh", "peaking", 4500, -1.5, 1.2),
+      band("wm-air", "highshelf", 9000, -1.0, 0.7),
     ],
   },
   {
-    // Clarity for dull dynamics / distant mics — presence without sizzle.
+    // Clarity for dull / distant mics — presence without sizzle.
     id: "bright",
     name: "Bright",
     builtin: true,
     bypass: false,
     bands: [
       band("br-hp", "highpass", 85, 0, 0.707),
-      band("br-mud", "peaking", 250, -2.5, 0.9),
-      band("br-presence", "peaking", 4000, 2.5, 1.0),
-      band("br-air", "highshelf", 11000, 2.0, 0.7),
-      band("br-sib", "peaking", 7000, -1.0, 2.0),
+      band("br-mud", "peaking", 250, -2.0, 0.9),
+      band("br-presence", "peaking", 4000, 2.0, 1.0),
+      band("br-sib", "peaking", 7000, -1.0, 1.5),
+      band("br-air", "highshelf", 11000, 1.5, 0.7),
     ],
   },
   {
-    // Desk / HVAC / handling noise — steeper low end, leave speech alone.
+    // Desk / HVAC / handling noise — cut lows, leave speech alone.
     id: "cut-rumble",
     name: "Cut rumble",
     builtin: true,
     bypass: false,
     bands: [
-      band("cr-hp", "highpass", 110, 0, 0.707),
-      band("cr-low", "lowshelf", 140, -5.0, 0.7),
-      band("cr-mud", "peaking", 200, -2.0, 1.0),
+      band("cr-hp", "highpass", 100, 0, 0.707),
+      band("cr-low", "lowshelf", 140, -3.5, 0.7),
+      band("cr-mud", "peaking", 200, -1.5, 1.0),
       band("cr-presence", "peaking", 3000, 0.5, 1.0),
     ],
   },
   {
-    // Deeper chest / baritone weight without turning into mud.
+    // Deeper chest / baritone weight — modest so it doesn’t clip.
     id: "deep",
     name: "Deep",
     builtin: true,
     bypass: false,
     bands: [
-      band("dp-hp", "highpass", 60, 0, 0.707),
-      band("dp-chest", "lowshelf", 140, 4.0, 0.7),
-      band("dp-body", "peaking", 200, 2.0, 1.0),
-      band("dp-mud", "peaking", 320, -1.5, 1.0),
-      band("dp-air", "highshelf", 9000, -1.5, 0.7),
+      band("dp-hp", "highpass", 65, 0, 0.707),
+      band("dp-chest", "lowshelf", 140, 2.5, 0.7),
+      band("dp-mud", "peaking", 320, -1.0, 1.0),
+      band("dp-air", "highshelf", 9000, -1.0, 0.7),
     ],
   },
   {
-    // Higher / lighter voices — cut boom, open the top for clarity.
+    // Higher / lighter voices — less boom, clearer top.
     id: "high",
     name: "High",
     builtin: true,
     bypass: false,
     bands: [
-      band("hi-hp", "highpass", 120, 0, 0.707),
-      band("hi-low", "lowshelf", 160, -4.5, 0.7),
-      band("hi-mud", "peaking", 250, -2.5, 0.9),
-      band("hi-presence", "peaking", 3800, 2.0, 1.0),
-      band("hi-air", "highshelf", 11000, 2.5, 0.7),
+      band("hi-hp", "highpass", 110, 0, 0.707),
+      band("hi-low", "lowshelf", 160, -3.0, 0.7),
+      band("hi-mud", "peaking", 250, -1.5, 0.9),
+      band("hi-presence", "peaking", 3800, 1.5, 1.0),
+      band("hi-air", "highshelf", 11000, 1.5, 0.7),
     ],
   },
 ];
+
+/** Pad / trim to a fixed filter count so the live graph never remounts. */
+export function padBandsToSlots(bands: EqBand[]): EqBand[] {
+  const slots: EqBand[] = bands.slice(0, MAX_EQ_SLOTS).map((b) => ({ ...b }));
+  while (slots.length < MAX_EQ_SLOTS) {
+    slots.push({
+      id: `slot-${slots.length}`,
+      type: "peaking",
+      frequency: 1000,
+      gain: 0,
+      q: 1,
+      enabled: false,
+    });
+  }
+  return slots;
+}
+
+/**
+ * Makeup gain (linear) so cut-heavy profiles don’t sound quieter than Flat.
+ * Kept modest — limiter after EQ catches residual peaks.
+ */
+export function makeupGainForProfile(profile: EqProfile): number {
+  if (profile.bypass) return 1;
+  let cut = 0;
+  let boost = 0;
+  for (const b of profile.bands) {
+    if (!b.enabled) continue;
+    if (b.type === "highpass" || b.type === "lowpass" || b.type === "notch") {
+      cut += 1.5;
+      continue;
+    }
+    if (b.gain < 0) cut += -b.gain;
+    else boost += b.gain;
+  }
+  // Recover some of the cut energy; never pile on top of big boosts.
+  const db = Math.min(5, Math.max(0, cut * 0.35 - boost * 0.15));
+  return Math.pow(10, db / 20);
+}
 
 export const DEFAULT_EQ_PROFILE_ID = "flat";
 
@@ -264,22 +303,21 @@ export function toBiquadType(t: EqBandType): BiquadFilterType {
 
 export function applyBandToFilter(filter: BiquadFilterNode, band: EqBand, bypass: boolean) {
   const now = filter.context.currentTime;
+  // Snap params (avoid setTarget + type swaps, which can ring/click mid-stream).
   if (bypass || !band.enabled) {
-    filter.type = "peaking";
-    filter.frequency.setTargetAtTime(1000, now, 0.015);
-    filter.Q.setTargetAtTime(1, now, 0.015);
-    filter.gain.setTargetAtTime(0, now, 0.015);
+    filter.type = "allpass";
+    filter.frequency.setValueAtTime(1000, now);
+    filter.Q.setValueAtTime(1, now);
+    filter.gain.setValueAtTime(0, now);
     return;
   }
   filter.type = toBiquadType(band.type);
-  filter.frequency.setTargetAtTime(
+  filter.frequency.setValueAtTime(
     Math.max(20, Math.min(20000, band.frequency)),
     now,
-    0.015,
   );
-  filter.Q.setTargetAtTime(Math.max(0.1, Math.min(18, band.q)), now, 0.015);
-  // highpass/lowpass/notch ignore gain in Web Audio; still set for consistency
-  filter.gain.setTargetAtTime(band.gain, now, 0.015);
+  filter.Q.setValueAtTime(Math.max(0.1, Math.min(18, band.q)), now);
+  filter.gain.setValueAtTime(band.gain, now);
 }
 
 // —— Frequency response (for SVG curve) ————————————————————————————————

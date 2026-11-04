@@ -343,6 +343,7 @@ export default function Recording() {
     participantId: studio?.participantId ?? "host",
     getVideoEl,
     getStream,
+    streamEpoch: media.streamEpoch,
     camOn: camOn && !!videoMode,
     micOn,
     peerVolumes,

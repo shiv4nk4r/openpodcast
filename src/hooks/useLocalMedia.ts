@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   applyBandToFilter,
   cloneProfile,
+  makeupGainForProfile,
+  MAX_EQ_SLOTS,
+  padBandsToSlots,
   resolveEqProfile,
   type EqProfile,
 } from "../lib/eq";
@@ -47,17 +50,21 @@ export function useLocalMedia(opts: {
   const monitoringDesiredRef = useRef(false);
   const smoothedRef = useRef(0);
   const eqFiltersRef = useRef<BiquadFilterNode[]>([]);
+  const makeupGainRef = useRef<GainNode | null>(null);
   const eqProfileRef = useRef<EqProfile>(
     opts.eqProfile
       ? cloneProfile(opts.eqProfile)
       : resolveEqProfile("flat", []),
   );
   const processedDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  /** Bumps when the outbound MediaStream is replaced (device restart only). */
+  const [streamEpoch, setStreamEpoch] = useState(0);
 
   const stopAudioGraph = () => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = 0;
     monitorGainRef.current = null;
+    makeupGainRef.current = null;
     eqFiltersRef.current = [];
     processedDestRef.current = null;
     void audioCtxRef.current?.close().catch(() => undefined);
@@ -67,25 +74,19 @@ export function useLocalMedia(opts: {
     setMonitoringState(false);
   };
 
-  const wireEqFilters = (
-    ctx: AudioContext,
-    input: AudioNode,
-    output: AudioNode,
-    profile: EqProfile,
-  ) => {
-    const bands = profile.bands.length
-      ? profile.bands
-      : [{ id: "noop", type: "peaking" as const, frequency: 1000, gain: 0, q: 1, enabled: true }];
-    const filters = bands.map(() => ctx.createBiquadFilter());
-    eqFiltersRef.current = filters;
-    let prev: AudioNode = input;
+  const applyProfileToGraph = (profile: EqProfile) => {
+    const filters = eqFiltersRef.current;
+    if (!filters.length) return;
+    const slots = padBandsToSlots(profile.bands);
     for (let i = 0; i < filters.length; i++) {
-      applyBandToFilter(filters[i], bands[i] ?? bands[0], profile.bypass);
-      prev.connect(filters[i]);
-      prev = filters[i];
+      applyBandToFilter(filters[i], slots[i], profile.bypass);
     }
-    prev.connect(output);
-    return filters;
+    const makeup = makeupGainRef.current;
+    if (makeup) {
+      const now = makeup.context.currentTime;
+      makeup.gain.cancelScheduledValues(now);
+      makeup.gain.setTargetAtTime(makeupGainForProfile(profile), now, 0.03);
+    }
   };
 
   const startAudioGraph = (raw: MediaStream) => {
@@ -105,18 +106,41 @@ export function useLocalMedia(opts: {
     analyser.fftSize = 2048;
     analyser.smoothingTimeConstant = 0.8;
 
+    const makeup = ctx.createGain();
+    makeupGainRef.current = makeup;
+
+    // Soft limiter — stops EQ boosts from hard-clipping into crackle on P2P PCM.
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = -8;
+    limiter.knee.value = 8;
+    limiter.ratio.value = 12;
+    limiter.attack.value = 0.003;
+    limiter.release.value = 0.12;
+
     const monitorGain = ctx.createGain();
     monitorGain.gain.value = monitoringDesiredRef.current ? 1 : 0;
     monitorGainRef.current = monitorGain;
 
-    const profile = eqProfileRef.current;
-    // Mic → EQ → destination (record/P2P) + analyser + monitor
-    wireEqFilters(ctx, source, dest, profile);
-    const last =
-      eqFiltersRef.current[eqFiltersRef.current.length - 1] ?? source;
-    last.connect(analyser);
-    last.connect(monitorGain);
+    // Fixed slot count: profile switches only retune filters — never remount tracks.
+    const filters: BiquadFilterNode[] = [];
+    for (let i = 0; i < MAX_EQ_SLOTS; i++) {
+      filters.push(ctx.createBiquadFilter());
+    }
+    eqFiltersRef.current = filters;
+
+    let prev: AudioNode = source;
+    for (const f of filters) {
+      prev.connect(f);
+      prev = f;
+    }
+    prev.connect(makeup);
+    makeup.connect(limiter);
+    limiter.connect(dest);
+    limiter.connect(analyser);
+    limiter.connect(monitorGain);
     monitorGain.connect(ctx.destination);
+
+    applyProfileToGraph(eqProfileRef.current);
     setMonitoringState(monitoringDesiredRef.current);
 
     const data = new Float32Array(analyser.fftSize);
@@ -135,9 +159,11 @@ export function useLocalMedia(opts: {
       const rms = Math.sqrt(sumSquares / data.length);
       const rawLevel = Math.min(1, rms * 3.2 + peak * 0.55);
       const boosted = Math.min(1, Math.pow(rawLevel, 0.65) * 1.35);
-      const prev = smoothedRef.current;
+      const prevSm = smoothedRef.current;
       const next =
-        boosted > prev ? prev * 0.35 + boosted * 0.65 : prev * 0.85 + boosted * 0.15;
+        boosted > prevSm
+          ? prevSm * 0.35 + boosted * 0.65
+          : prevSm * 0.85 + boosted * 0.15;
       smoothedRef.current = next;
       const now = performance.now();
       if (now - lastUi > 50) {
@@ -151,39 +177,11 @@ export function useLocalMedia(opts: {
     return dest.stream;
   };
 
-  const rebuildProcessedStream = () => {
-    const raw = rawStreamRef.current;
-    if (!raw || !opts.audio) return;
-    const processedAudio = startAudioGraph(raw);
-    if (!processedAudio) return;
-    const combined = new MediaStream([
-      ...processedAudio.getAudioTracks(),
-      ...raw.getVideoTracks(),
-    ]);
-    streamRef.current = combined;
-    if (videoRef.current) {
-      videoRef.current.srcObject = combined;
-    }
-  };
-
-  /** Live-update EQ without tearing down getUserMedia. */
+  /** Live-update EQ in place — never replaces the outbound MediaStream. */
   const applyEqProfile = useCallback((profile: EqProfile) => {
     const next = cloneProfile(profile);
     eqProfileRef.current = next;
-    const filters = eqFiltersRef.current;
-    const bandCount = Math.max(1, next.bands.length);
-
-    if (!audioCtxRef.current || filters.length !== bandCount) {
-      rebuildProcessedStream();
-      return;
-    }
-
-    const bands = next.bands.length
-      ? next.bands
-      : [{ id: "noop", type: "peaking" as const, frequency: 1000, gain: 0, q: 1, enabled: true }];
-    for (let i = 0; i < filters.length; i++) {
-      applyBandToFilter(filters[i], bands[i] ?? bands[0], next.bypass);
-    }
+    applyProfileToGraph(next);
   }, []);
 
   const start = useCallback(
@@ -260,6 +258,7 @@ export function useLocalMedia(opts: {
           }
         }
         streamRef.current = combined;
+        setStreamEpoch((n) => n + 1);
 
         if (videoRef.current) {
           videoRef.current.controls = false;
@@ -486,6 +485,8 @@ export function useLocalMedia(opts: {
     stopRecording,
     grabJpegFrame,
     stream: streamRef,
+    /** Increments when capture restarts — P2P tap should re-attach. */
+    streamEpoch,
     /** Active recorder mime — useful to pick file extension before start. */
     pickRecorderExtension: () => {
       if (MediaRecorder.isTypeSupported("video/mp4;codecs=avc1,mp4a.40.2"))

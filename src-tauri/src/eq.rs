@@ -171,6 +171,11 @@ impl EqChain {
         for biquad in cascade {
             x = biquad.process(x);
         }
+        // Soft knee near full-scale so EQ boosts don't brickwall before INPUT_GAIN.
+        if x.abs() > 0.85 {
+            let sign = if x >= 0.0 { 1.0 } else { -1.0 };
+            x = sign * (0.85 + 0.15 * (x.abs() - 0.85).tanh());
+        }
         x
     }
 }
