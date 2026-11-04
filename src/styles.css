@@ -3131,6 +3131,48 @@ a {
   border-color: var(--cta);
 }
 
+.rs-mic-test {
+  margin: 0 0 16px;
+}
+
+.rs-mic-test-btn {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  color: var(--ink);
+  font-weight: 700;
+  font-size: 0.92rem;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.rs-mic-test-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--ink) 22%, var(--hairline));
+}
+
+.rs-mic-test-btn.is-active {
+  background: color-mix(in srgb, var(--accent, #3d8bfd) 18%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent, #3d8bfd) 45%, var(--hairline));
+  color: var(--ink);
+}
+
+.rs-mic-test-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.rs-mic-test-hint {
+  margin: 8px 0 0;
+  color: var(--ink-muted);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
 .rs-join-btn {
   width: 100%;
   padding: 16px 18px;

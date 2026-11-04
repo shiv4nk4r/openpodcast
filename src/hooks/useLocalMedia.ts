@@ -27,18 +27,24 @@ export function useLocalMedia(opts: {
   const [level, setLevel] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  /** True while mic is routed to local speakers for a pre-join listen test. */
+  const [monitoring, setMonitoringState] = useState(false);
   const rafRef = useRef<number>(0);
 
   const meterCtxRef = useRef<AudioContext | null>(null);
+  const monitorGainRef = useRef<GainNode | null>(null);
+  const monitoringDesiredRef = useRef(false);
   const smoothedRef = useRef(0);
 
   const stopMeter = () => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = 0;
+    monitorGainRef.current = null;
     void meterCtxRef.current?.close().catch(() => undefined);
     meterCtxRef.current = null;
     smoothedRef.current = 0;
     setLevel(0);
+    setMonitoringState(false);
   };
 
   const startMeter = (stream: MediaStream) => {
@@ -55,7 +61,14 @@ export function useLocalMedia(opts: {
     // Larger window + slight smoothing gives a stabler, fuller meter
     analyser.fftSize = 2048;
     analyser.smoothingTimeConstant = 0.8;
+    const gain = ctx.createGain();
+    // Soft start; restore monitor if user was testing when devices changed.
+    gain.gain.value = monitoringDesiredRef.current ? 1 : 0;
+    monitorGainRef.current = gain;
     source.connect(analyser);
+    source.connect(gain);
+    gain.connect(ctx.destination);
+    setMonitoringState(monitoringDesiredRef.current);
 
     const data = new Float32Array(analyser.fftSize);
     let lastUi = 0;
@@ -214,6 +227,24 @@ export function useLocalMedia(opts: {
     });
   };
 
+  /** Play the live mic into local speakers so the user can hear pickup quality. */
+  const setMonitoring = useCallback(async (on: boolean) => {
+    monitoringDesiredRef.current = on;
+    const ctx = meterCtxRef.current;
+    const gain = monitorGainRef.current;
+    if (!ctx || !gain) {
+      setMonitoringState(false);
+      return;
+    }
+    if (ctx.state === "suspended") {
+      await ctx.resume().catch(() => undefined);
+    }
+    const now = ctx.currentTime;
+    gain.gain.cancelScheduledValues(now);
+    gain.gain.setTargetAtTime(on ? 1 : 0, now, 0.02);
+    setMonitoringState(on);
+  }, []);
+
   const enqueueWrite = (task: () => Promise<void>) => {
     writeQueueRef.current = writeQueueRef.current
       .then(task)
@@ -339,6 +370,8 @@ export function useLocalMedia(opts: {
     level,
     error,
     ready,
+    monitoring,
+    setMonitoring,
     start,
     toggleTrack,
     startRecording,

@@ -4,6 +4,7 @@ import {
   IconCamera,
   IconCameraOff,
   IconChevronDown,
+  IconEar,
   IconHeadphones,
   IconMicrophone,
   IconMicrophoneOff,
@@ -70,6 +71,7 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
   useEffect(() => {
     void api.setNativeAec(!headphones).catch(() => undefined);
   }, [headphones]);
+
   const [audioId, setAudioId] = useState(settings.preferred_mic_id ?? "");
   const [videoId, setVideoId] = useState(settings.preferred_camera_id ?? "");
   const [speakerId, setSpeakerId] = useState(settings.preferred_speaker_id ?? "");
@@ -77,6 +79,43 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
   const [micOn, setMicOn] = useState(true);
   const [qualityOpen, setQualityOpen] = useState(false);
   const qualityRef = useRef<HTMLDivElement | null>(null);
+
+  // Avoid speaker feedback if they leave the lobby with monitor still on.
+  const setMonitoring = media.setMonitoring;
+  useEffect(() => {
+    return () => {
+      void setMonitoring(false);
+    };
+  }, [setMonitoring]);
+
+  async function toggleMicTest() {
+    if (!micOn) {
+      setMicOn(true);
+      media.toggleTrack("audio", true);
+    }
+    await media.setMonitoring(!media.monitoring);
+  }
+
+  const micTestBlock = (
+    <div className="rs-mic-test">
+      <button
+        type="button"
+        className={`rs-mic-test-btn${media.monitoring ? " is-active" : ""}`}
+        onClick={() => void toggleMicTest()}
+        disabled={!media.ready}
+        aria-pressed={media.monitoring}
+      >
+        <IconEar size={18} stroke={1.75} />
+        {media.monitoring ? "Stop mic test" : "Test microphone"}
+      </button>
+      {media.monitoring && (
+        <p className="rs-mic-test-hint">
+          Speak normally — you should hear yourself in the speakers
+          {!headphones ? " (use headphones to avoid feedback)" : ""}.
+        </p>
+      )}
+    </div>
+  );
 
   // Settings load async after mount; don't keep the default "Host" placeholder.
   useEffect(() => {
@@ -267,6 +306,7 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
         ...current,
         displayName,
       });
+      await media.setMonitoring(false);
       navigate("/studio");
     } catch (e) {
       setBootError(String(e).replace(/^Error:\s*/i, ""));
@@ -297,6 +337,7 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
         hostName: res.host_name || "Host",
         invite: ticket,
       });
+      await media.setMonitoring(false);
       navigate("/studio");
     } catch (e) {
       setJoinError(String(e).replace(/^Error:\s*/i, ""));
@@ -395,6 +436,8 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
                 </button>
               </div>
 
+              {micTestBlock}
+
               <button
                 type="button"
                 className="rs-join-btn"
@@ -463,6 +506,8 @@ export default function Lobby({ initialPanel }: { initialPanel?: Panel }) {
                   I am using headphones
                 </button>
               </div>
+
+              {micTestBlock}
 
               {joinError && <p className="rs-join-error">{joinError}</p>}
 
