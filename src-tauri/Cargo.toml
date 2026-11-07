@@ -1,6 +1,6 @@
 [package]
 name = "openpodcast"
-version = "0.1.4",
+version = "0.1.4"
 description = "Local podcast studio — Riverside-style recording on your machine"
 authors = ["OpenPodcast"]
 edition = "2021"
