@@ -26,7 +26,7 @@
     "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
-    "@vitejs/plugin-react": "^6.0.2",
+    "@vitejs/plugin-react": "^6.2.1",
     "ffmpeg-static": "^5.3.0",
     "typescript": "~5.8.3",
     "vite": "^8.0.16"
